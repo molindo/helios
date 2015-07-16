@@ -568,17 +568,21 @@ public class ZooKeeperMasterModel implements MasterModel {
   private List<ZooKeeperOperation> getRolloutOperations(final DeploymentGroup deploymentGroup,
                                                         final DeploymentGroupStatus status) {
     final int taskIndex = status.getTaskIndex();
-    final RolloutTask currentTask = Iterables.get(status.getRolloutTasks(), taskIndex, null);
+    final List<RolloutTask> rolloutTasks = status.getRolloutTasks();
+    final int numRolloutTasks = rolloutTasks.size();
+    final RolloutTask currentTask = Iterables.get(rolloutTasks, taskIndex, null);
 
     final RollingUpdateTaskResult result;
-    if (status.getRolloutTasks().isEmpty()) {
+    if (numRolloutTasks == 0) {
       // if there are no rollout tasks, then we're done by definition. this can happen
       // when (for example) there are no hosts in the deployment group
       result = RollingUpdateTaskResult.TASK_COMPLETE;
     } else {
       final String host = currentTask.getTarget();
 
-      if (currentTask.getAction().equals(Action.UNDEPLOY_OLD_JOBS)) {
+      if (status.getFailedTargets().contains(host)) {
+        result = RollingUpdateTaskResult.SKIP;
+      } else if (currentTask.getAction().equals(Action.UNDEPLOY_OLD_JOBS)) {
         // add undeploy ops for jobs previously deployed by this deployment group
         result = rollingUpdateUndeploy(deploymentGroup, host);
       } else if (currentTask.getAction().equals(Action.DEPLOY_NEW_JOB)) {
@@ -593,32 +597,49 @@ public class ZooKeeperMasterModel implements MasterModel {
     }
 
     final String statusPath = Paths.statusDeploymentGroup(deploymentGroup.getName());
-    if (result.equals(RollingUpdateTaskResult.TASK_IN_PROGRESS)) {
+    final List<ZooKeeperOperation> operations = Lists.newArrayList(result.operations);
+
+    if (result == RollingUpdateTaskResult.TASK_IN_PROGRESS) {
       // not an error, but nothing to do
       return emptyList();
-    } else if (result.error != null) {
-      // if an error occurred, record it in the status and fail
-      return Lists.newArrayList(set(statusPath, status.toBuilder()
-          .setState(FAILED)
-          .setError(result.error.toString())
+    }
+
+    final DeploymentGroupStatus.Builder statusBuilder = status.toBuilder();
+
+    if (result.error != null) {
+      // If an error occurred, mark the target as failed.
+      statusBuilder.addFailedTarget(currentTask.getTarget());
+
+      final ZooKeeperClient client = provider.get("getRolloutOperations");
+      // TODO (dxia) optimize getting hosts?
+      final int numTargets = getDeploymentGroupHosts(client, deploymentGroup).size();
+
+      if (((float) statusBuilder.getFailedTargets().size() / numTargets * 100)
+          > deploymentGroup.getRolloutOptions().getFailureThreshold()) {
+        // If the rollout is above the failure threshold, fail the entire rollout
+        operations.add(set(statusPath, statusBuilder
+            .setState(FAILED)
+            .setError(result.error.toString())
+            .build()));
+
+        return operations;
+      }
+    }
+
+    // If the rollout hasn't been marked as failed, continue.
+    if (taskIndex + 1 >= numRolloutTasks) {
+      // successfully completed the last task
+      operations.add(set(statusPath, statusBuilder
+          .setSuccessfulIterations(status.getSuccessfulIterations() + 1)
+          .setState(DONE)
           .build()));
     } else {
-      List<ZooKeeperOperation> operations = Lists.newArrayList(result.operations);
-
-      if (taskIndex + 1 >= status.getRolloutTasks().size()) {
-        // successfully completed the last task
-        operations.add(set(statusPath, status.toBuilder()
-            .setSuccessfulIterations(status.getSuccessfulIterations() + 1)
-            .setState(DONE)
-            .build()));
-      } else {
-        operations.add(set(statusPath, status.toBuilder()
-            .setTaskIndex(taskIndex + 1)
-            .build()));
-      }
-
-      return operations;
+      operations.add(set(statusPath, statusBuilder
+          .setTaskIndex(taskIndex + 1)
+          .build()));
     }
+
+    return operations;
   }
 
   private RollingUpdateTaskResult rollingUpdateAwaitRunning(final DeploymentGroup deploymentGroup,
@@ -811,13 +832,20 @@ public class ZooKeeperMasterModel implements MasterModel {
   @Override
   public List<String> getDeploymentGroupHosts(final String name)
       throws DeploymentGroupDoesNotExistException {
-    log.debug("getting deployment group hosts: {}", name);
     final ZooKeeperClient client = provider.get("getDeploymentGroupHosts");
 
     final DeploymentGroup deploymentGroup = getDeploymentGroup(client, name);
     if (deploymentGroup == null) {
       throw new DeploymentGroupDoesNotExistException(name);
     }
+
+    return getDeploymentGroupHosts(client, deploymentGroup);
+  }
+
+  private List<String> getDeploymentGroupHosts(final ZooKeeperClient client,
+                                               final DeploymentGroup deploymentGroup) {
+    final String name = deploymentGroup.getName();
+    log.debug("getting deployment group hosts: {}", name);
 
     try {
       final byte[] data = client.getData(Paths.statusDeploymentGroupHosts(name));
@@ -844,7 +872,6 @@ public class ZooKeeperMasterModel implements MasterModel {
     final ZooKeeperClient client = provider.get("getJobId");
     return getJob(client, id);
   }
-
 
   private Job getJob(final ZooKeeperClient client, final JobId id) {
     final String path = Paths.configJob(id);
@@ -1554,6 +1581,8 @@ public class ZooKeeperMasterModel implements MasterModel {
     private final Exception error;
 
     public static final RollingUpdateTaskResult TASK_IN_PROGRESS = of(null);
+
+    public static final RollingUpdateTaskResult SKIP = of(null);
 
     public static final RollingUpdateTaskResult TASK_COMPLETE = of(
         Collections.<ZooKeeperOperation>emptyList());
