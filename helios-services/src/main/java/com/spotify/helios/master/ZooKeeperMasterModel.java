@@ -28,8 +28,10 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
+import com.google.common.util.concurrent.AbstractIdleService;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.spotify.helios.agent.KafkaClientProvider;
 import com.spotify.helios.common.HeliosRuntimeException;
 import com.spotify.helios.common.Json;
 import com.spotify.helios.common.descriptors.AgentInfo;
@@ -43,11 +45,13 @@ import com.spotify.helios.common.descriptors.Job;
 import com.spotify.helios.common.descriptors.JobId;
 import com.spotify.helios.common.descriptors.JobStatus;
 import com.spotify.helios.common.descriptors.PortMapping;
+import com.spotify.helios.common.descriptors.DeploymentGroupEvent;
 import com.spotify.helios.common.descriptors.RolloutOptions;
 import com.spotify.helios.common.descriptors.RolloutTask;
 import com.spotify.helios.common.descriptors.Task;
 import com.spotify.helios.common.descriptors.TaskStatus;
 import com.spotify.helios.common.descriptors.TaskStatusEvent;
+import com.spotify.helios.rollingupdate.DeploymentGroupHistoryWriter;
 import com.spotify.helios.rollingupdate.RolloutPlanner;
 import com.spotify.helios.servicescommon.coordination.Node;
 import com.spotify.helios.servicescommon.coordination.Paths;
@@ -65,6 +69,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -96,7 +101,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 /**
  * The Helios Master's view into ZooKeeper.
  */
-public class ZooKeeperMasterModel implements MasterModel {
+public class ZooKeeperMasterModel extends AbstractIdleService implements MasterModel {
   private static final Comparator<TaskStatusEvent> EVENT_COMPARATOR =
       new Comparator<TaskStatusEvent>() {
         @Override
@@ -127,16 +132,59 @@ public class ZooKeeperMasterModel implements MasterModel {
       STRING_LIST_TYPE =
       new TypeReference<List<String>>() {};
 
+  private static final String DEPLOYMENT_GROUP_HISTORY_FILENAME = "deployment-group-history.json";
+
   private final ZooKeeperClientProvider provider;
   private final String name;
+  private final DeploymentGroupHistoryWriter deploymentGroupHistoryWriter;
 
-  public  ZooKeeperMasterModel(final ZooKeeperClientProvider provider) {
+  public  ZooKeeperMasterModel(final ZooKeeperClientProvider provider)
+      throws IOException, InterruptedException {
     this(provider, null);
   }
 
-  public ZooKeeperMasterModel(final ZooKeeperClientProvider provider, @Nullable final String name) {
+  public ZooKeeperMasterModel(final ZooKeeperClientProvider provider, @Nullable final String name)
+      throws IOException, InterruptedException {
+    this(provider, name, null, null);
+  }
+
+  /**
+   * Constructor
+   *
+   * @param provider         {@link ZooKeeperClientProvider}
+   * @param name             The hostname of the machine running the {@link MasterModel}
+   * @param kafkaProvider    {@link KafkaClientProvider}
+   * @param stateDirectory   Directory for persisting master state locally.
+   */
+  public ZooKeeperMasterModel(final ZooKeeperClientProvider provider,
+                              @Nullable final String name,
+                              @Nullable final KafkaClientProvider kafkaProvider,
+                              @Nullable final Path stateDirectory)
+      throws IOException, InterruptedException {
     this.provider = provider;
     this.name = name;
+
+    if (kafkaProvider != null && stateDirectory != null) {
+      final ZooKeeperClient zkClient = provider.get("ZooKeeperMasterModel_ctor");
+      this.deploymentGroupHistoryWriter = new DeploymentGroupHistoryWriter(
+          zkClient, kafkaProvider, stateDirectory.resolve(DEPLOYMENT_GROUP_HISTORY_FILENAME));
+    } else {
+      this.deploymentGroupHistoryWriter = null;
+    }
+  }
+
+  @Override
+  protected void startUp() throws Exception {
+    if (deploymentGroupHistoryWriter != null) {
+      deploymentGroupHistoryWriter.startAsync().awaitRunning();
+    }
+  }
+
+  @Override
+  protected void shutDown() throws Exception {
+    if (deploymentGroupHistoryWriter != null) {
+      deploymentGroupHistoryWriter.stopAsync().awaitTerminated();
+    }
   }
 
   /**
@@ -505,7 +553,7 @@ public class ZooKeeperMasterModel implements MasterModel {
   @Override
   public void rollingUpdateStep(final DeploymentGroup deploymentGroup,
                                 final RolloutPlanner rolloutPlanner)
-      throws DeploymentGroupDoesNotExistException {
+      throws DeploymentGroupDoesNotExistException, InterruptedException {
     checkNotNull(deploymentGroup, "deploymentGroup");
 
     log.info("rolling-update step on deployment-group: name={}", deploymentGroup.getName());
@@ -515,6 +563,7 @@ public class ZooKeeperMasterModel implements MasterModel {
     final DeploymentGroupStatus status = getDeploymentGroupStatus(deploymentGroup.getName());
 
     final List<ZooKeeperOperation> operations = Lists.newArrayList();
+    final List<DeploymentGroupEvent> events = Lists.newArrayList();
 
     if (status.getState().equals(PLANNING_ROLLOUT)) {
       // generate the rollout plan and proceed to ROLLING_OUT
@@ -538,14 +587,19 @@ public class ZooKeeperMasterModel implements MasterModel {
       }
 
       operations.add(set(statusPath, newStatus.build()));
+      events.add(DeploymentGroupEvent.newBuilder().setDeploymentGroup(deploymentGroup)
+                     .setDeploymentGroupState(ROLLING_OUT).build());
     } else if (status.getState().equals(ROLLING_OUT)) {
       // grab the current task off the rollout task list and execute it
-      operations.addAll(getRolloutOperations(deploymentGroup, status));
+      // TODO (dxia) passing in events as a mutable list here seems ugly
+      operations.addAll(getRolloutOperations(deploymentGroup, status, events));
     } else if (status.getState().equals(DONE)) {
       // after DONE, go back to PLANNING_ROLLOUT
       operations.add(set(statusPath, status.toBuilder()
           .setState(PLANNING_ROLLOUT)
           .build()));
+      events.add(DeploymentGroupEvent.newBuilder().setDeploymentGroup(deploymentGroup)
+                     .setDeploymentGroupState(PLANNING_ROLLOUT).build());
     }
 
     if (operations.isEmpty()) {
@@ -559,10 +613,13 @@ public class ZooKeeperMasterModel implements MasterModel {
       throw new HeliosRuntimeException(
           "rolling-update on deployment-group " + deploymentGroup.getName() + " failed", e);
     }
+
+    deploymentGroupHistoryWriter.saveHistoryItems(events);
   }
 
   private List<ZooKeeperOperation> getRolloutOperations(final DeploymentGroup deploymentGroup,
-                                                        final DeploymentGroupStatus status) {
+                                                        final DeploymentGroupStatus status,
+                                                        final List<DeploymentGroupEvent> events) {
     final int taskIndex = status.getTaskIndex();
     final RolloutTask currentTask = Iterables.get(status.getRolloutTasks(), taskIndex, null);
 
@@ -594,12 +651,20 @@ public class ZooKeeperMasterModel implements MasterModel {
       return emptyList();
     } else if (result.error != null) {
       // if an error occurred, record it in the status and fail
+      events.add(DeploymentGroupEvent.newBuilder().setDeploymentGroup(deploymentGroup)
+                     .setDeploymentGroupState(FAILED).build());
       return Lists.newArrayList(set(statusPath, status.toBuilder()
           .setState(FAILED)
           .setError(result.error.toString())
           .build()));
     } else {
       List<ZooKeeperOperation> operations = Lists.newArrayList(result.operations);
+      final DeploymentGroupEvent.Builder eventBuilder = DeploymentGroupEvent.newBuilder()
+          .setDeploymentGroup(deploymentGroup)
+          .setAction(currentTask.getAction())
+          .setJobId(deploymentGroup.getJobId())
+          .setTarget(currentTask.getTarget())
+          .setRolloutTaskStatus(RolloutTask.Status.OK);
 
       if (taskIndex + 1 >= status.getRolloutTasks().size()) {
         // successfully completed the last task
@@ -607,10 +672,12 @@ public class ZooKeeperMasterModel implements MasterModel {
             .setSuccessfulIterations(status.getSuccessfulIterations() + 1)
             .setState(DONE)
             .build()));
+        events.add(eventBuilder.setDeploymentGroupState(DONE).build());
       } else {
         operations.add(set(statusPath, status.toBuilder()
             .setTaskIndex(taskIndex + 1)
             .build()));
+        events.add(eventBuilder.build());
       }
 
       return operations;

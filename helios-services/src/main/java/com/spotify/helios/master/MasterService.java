@@ -21,12 +21,14 @@
 
 package com.spotify.helios.master;
 
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Resources;
 import com.google.common.util.concurrent.AbstractIdleService;
 
 import com.codahale.metrics.MetricRegistry;
+import com.spotify.helios.agent.KafkaClientProvider;
 import com.spotify.helios.master.http.VersionResponseFilter;
 import com.spotify.helios.master.metrics.ReportingResourceMethodDispatchAdapter;
 import com.spotify.helios.master.resources.DeploymentGroupResource;
@@ -68,6 +70,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.concurrent.TimeUnit;
 
@@ -95,8 +99,8 @@ public class MasterService extends AbstractIdleService {
   private final Server server;
   private final MasterConfig config;
   private final ServiceRegistrar registrar;
-  private final RiemannFacade riemannFacade;
   private final ZooKeeperClient zooKeeperClient;
+  private final ZooKeeperMasterModel model;
   private final ExpiredJobReaper expiredJobReaper;
   private final CuratorClientFactory curatorClientFactory;
   private final RollingUpdateService rollingUpdateService;
@@ -113,7 +117,7 @@ public class MasterService extends AbstractIdleService {
    */
   public MasterService(final MasterConfig config, final Environment environment,
                        final CuratorClientFactory curatorClientFactory)
-      throws ConfigurationException {
+      throws ConfigurationException, IOException, InterruptedException {
     this.config = config;
     this.curatorClientFactory = curatorClientFactory;
 
@@ -122,7 +126,7 @@ public class MasterService extends AbstractIdleService {
     final MetricRegistry metricsRegistry = new MetricRegistry();
     final RiemannSupport riemannSupport = new RiemannSupport(metricsRegistry,
         config.getRiemannHostPort(), config.getName(), "helios-master");
-    riemannFacade = riemannSupport.getFacade();
+    final RiemannFacade riemannFacade = riemannSupport.getFacade();
     log.info("Starting metrics");
     final Metrics metrics;
     if (config.isInhibitMetrics()) {
@@ -141,7 +145,21 @@ public class MasterService extends AbstractIdleService {
         riemannFacade, metrics.getZooKeeperMetrics());
     final ZooKeeperClientProvider zkClientProvider = new ZooKeeperClientProvider(
         zooKeeperClient, modelReporter);
-    final MasterModel model = new ZooKeeperMasterModel(zkClientProvider, config.getName());
+    final KafkaClientProvider kafkaClientProvider = new KafkaClientProvider(
+        config.getKafkaBrokers());
+
+    // Create state directory, if necessary
+    final Path stateDirectory = config.getStateDirectory().toAbsolutePath().normalize();
+    if (!Files.exists(stateDirectory)) {
+      try {
+        Files.createDirectories(stateDirectory);
+      } catch (IOException e) {
+        log.error("Failed to create state directory: {}", stateDirectory, e);
+        throw Throwables.propagate(e);
+      }
+    }
+    this.model = new ZooKeeperMasterModel(
+        zkClientProvider, config.getName(), kafkaClientProvider, stateDirectory);
 
     final ZooKeeperHealthChecker zooKeeperHealthChecker = new ZooKeeperHealthChecker(
         zooKeeperClient, Paths.statusMasters(), riemannFacade, TimeUnit.MINUTES, 2);
@@ -207,7 +225,7 @@ public class MasterService extends AbstractIdleService {
     setUpRequestLogging();
   }
 
-  private final void setUpRequestLogging() {
+  private void setUpRequestLogging() {
     // Set up request logging
     final Handler originalHandler = server.getHandler();
     final HandlerCollection handlerCollection;
@@ -247,6 +265,8 @@ public class MasterService extends AbstractIdleService {
             config.getDomain(), config.getName())
         .build();
     registrar.register(serviceRegistration);
+
+    model.startAsync().awaitRunning();
   }
 
   @Override
@@ -258,6 +278,7 @@ public class MasterService extends AbstractIdleService {
     expiredJobReaper.stopAsync().awaitTerminated();
     zkRegistrar.stopAsync().awaitTerminated();
     zooKeeperClient.close();
+    model.stopAsync().awaitTerminated();
   }
 
   private void logBanner() {

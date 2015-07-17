@@ -123,7 +123,7 @@ public interface MasterModel {
       throws DeploymentGroupDoesNotExistException, JobDoesNotExistException;
 
   void rollingUpdateStep(DeploymentGroup deploymentGroup, RolloutPlanner rolloutPlanner)
-      throws DeploymentGroupDoesNotExistException;
+      throws DeploymentGroupDoesNotExistException, InterruptedException;
 
   void abortRollingUpdate(String deploymentGroupName) throws DeploymentGroupDoesNotExistException;
 }

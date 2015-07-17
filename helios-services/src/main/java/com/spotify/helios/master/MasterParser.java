@@ -29,6 +29,11 @@ import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
 
 import java.net.InetSocketAddress;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+
+import static net.sourceforge.argparse4j.impl.Arguments.append;
 
 /**
  * Parses command-line arguments to produce the {@link MasterConfig}.
@@ -39,12 +44,15 @@ public class MasterParser extends ServiceParser {
 
   private Argument httpArg;
   private Argument adminArg;
+  private Argument kafkaArg;
+  private Argument stateDirArg;
 
   public MasterParser(final String... args) throws ArgumentParserException {
     super("helios-master", "Spotify Helios Master", args);
 
     final Namespace options = getNamespace();
     final InetSocketAddress httpAddress = parseSocketAddress(options.getString(httpArg.getDest()));
+    final List<String> kafkaBrokers = options.getList(kafkaArg.getDest());
 
     final MasterConfig config = new MasterConfig()
         .setZooKeeperConnectString(getZooKeeperConnectString())
@@ -62,7 +70,9 @@ public class MasterParser extends ServiceParser {
         .setServiceRegistryAddress(getServiceRegistryAddress())
         .setServiceRegistrarPlugin(getServiceRegistrarPlugin())
         .setAdminPort(options.getInt(adminArg.getDest()))
-        .setHttpEndpoint(httpAddress);
+        .setHttpEndpoint(httpAddress)
+        .setKafkaBrokers(kafkaBrokers)
+        .setStateDirectory(Paths.get(options.getString(stateDirArg.getDest())));
 
     this.masterConfig = config;
   }
@@ -77,6 +87,15 @@ public class MasterParser extends ServiceParser {
         .type(Integer.class)
         .setDefault(5802)
         .help("admin http port");
+
+    kafkaArg = parser.addArgument("--kafka")
+        .action(append())
+        .setDefault(new ArrayList<String>())
+        .help("Kafka brokers to bootstrap with");
+
+    stateDirArg = parser.addArgument("--state-dir")
+        .setDefault(".")
+        .help("Directory for persisting agent state locally.");
   }
 
   public MasterConfig getMasterConfig() {
