@@ -1,5 +1,16 @@
 package com.spotify.helios.agent;
 
+import static java.util.Arrays.asList;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+
+import java.util.Map;
+
+import org.junit.Test;
+
+import com.google.common.collect.ImmutableMap;
+import com.spotify.docker.client.messages.ContainerConfig;
+import com.spotify.docker.client.messages.ImageInfo;
 import com.spotify.helios.common.descriptors.HealthCheck;
 import com.spotify.helios.common.descriptors.Job;
 import com.spotify.helios.common.descriptors.PortMapping;
@@ -7,11 +18,6 @@ import com.spotify.helios.common.descriptors.ServiceEndpoint;
 import com.spotify.helios.common.descriptors.ServicePorts;
 import com.spotify.helios.serviceregistration.ServiceRegistration;
 import com.spotify.helios.serviceregistration.ServiceRegistration.EndpointHealthCheck;
-import org.junit.Test;
-
-import static java.util.Arrays.asList;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 
 public class TaskConfigTest {
   private static final String HOST = "HOST";
@@ -77,5 +83,26 @@ public class TaskConfigTest {
 
     ServiceRegistration.Endpoint endpoint = taskConfig.registration().getEndpoints().get(0);
     assertNull(endpoint.getHealthCheck());
+  }
+
+  @Test
+  public void testResolveCmd() throws Exception {
+    final Map<String,String> lookup = ImmutableMap.of("arg3", "resolved_arg3");
+    final Job job = JOB.toBuilder()
+      .setCommand(asList("arg1", "${arg2}", "${arg3}"))
+      .build();
+
+    final TaskConfig taskConfig = TaskConfig.builder()
+      .namespace("test")
+      .host(HOST)
+      .job(job)
+      .build();
+
+    ContainerConfig cfg = taskConfig.containerConfig(new ImageInfo(), lookup);
+    assertEquals("arg1", cfg.cmd().get(0));
+    // unresolved
+    assertEquals("${arg2}", cfg.cmd().get(1));
+    // resolved
+    assertEquals("resolved_arg3", cfg.cmd().get(2));
   }
 }
