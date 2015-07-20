@@ -124,6 +124,7 @@ public class TaskConfig {
     final ContainerConfig.Builder builder = ContainerConfig.builder();
 
     builder.image(job.getImage());
+    builder.hostname(job.getHostname());
     builder.cmd(containerCmdStrings(properties));
     builder.env(containerEnvStrings());
     builder.exposedPorts(containerExposedPorts());
