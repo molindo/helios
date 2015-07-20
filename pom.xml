@@ -2,10 +2,15 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
+  <parent>
+    <groupId>at.molindo</groupId>
+    <artifactId>molindo-oss-pom</artifactId>
+    <version>5</version>
+  </parent>
+
   <name>Helios Parent</name>
   <description>A docker container orchestration system and deployment platform</description>
-  <url>https://github.com/spotify/helios</url>
-  <groupId>com.spotify</groupId>
+  <url>https://github.com/molindo/helios</url>
   <artifactId>helios-parent</artifactId>
   <version>0.8.0-SNAPSHOT</version>
   <packaging>pom</packaging>
@@ -19,9 +24,9 @@
   </licenses>
 
   <scm>
-    <connection>scm:git:https://github.com/spotify/helios.git</connection>
-    <developerConnection>scm:git:git@github.com:spotify/helios.git</developerConnection>
-    <url>https://github.com/spotify/helios</url>
+    <connection>scm:git:https://github.com/molindo/helios.git</connection>
+    <developerConnection>scm:git:git@github.com:molindo/helios.git</developerConnection>
+    <url>https://github.com/molindo/helios</url>
     <tag>HEAD</tag>
   </scm>
 
@@ -379,6 +384,17 @@
 
   <build>
     <plugins>
+      <!-- disable license check (inherited by molindo-oss pom)-->
+      <plugin>
+        <groupId>com.mycila.maven-license-plugin</groupId>
+        <artifactId>maven-license-plugin</artifactId>
+        <version>1.9.0</version>        
+        <executions>
+          <execution>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>      
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-release-plugin</artifactId>
