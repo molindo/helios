@@ -30,18 +30,22 @@
     <url>https://github.com/molindo/helios</url>
     <tag>HEAD</tag>
   </scm>
-<!-- 
+  <ciManagement>
+    <system>TeamCity</system>
+    <url>https://oss.molindo.at/</url>
+  </ciManagement>
   <distributionManagement>
+    <repository>
+      <id>sonatype-nexus-staging</id>
+      <name>Nexus Release Repository</name>
+      <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+    </repository>
     <snapshotRepository>
-      <id>ossrh</id>
-      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+      <id>sonatype-nexus-snapshots</id>
+      <name>Sonatype Nexus Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
     </snapshotRepository>
-    <site>
-      <id>spotify.github.io</id>
-      <url>file:///tmp/helios-docs</url>
-    </site>
   </distributionManagement>
--->
   <developers>
     <developer>
       <id>dano</id>
@@ -99,6 +103,26 @@
       <id>bintray-readytalk</id>
       <url>http://dl.bintray.com/readytalk/maven</url>
     </repository>
+        <repository>
+      <releases>
+        <enabled>false</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+      <id>sonatype-nexus-snapshots</id>
+      <name>Sonatype Nexus Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+    </repository>
+    <repository>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+      <id>central</id>
+      <name>Central Repository</name>
+      <url>http://repo.maven.apache.org/maven2</url>
+    </repository>
+  </repositories>
   </repositories>
 
   <dependencies>
