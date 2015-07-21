@@ -315,7 +315,32 @@
         </plugins>
       </build>
     </profile>
-
+    
+    <profile>
+      <id>release-sonatype-molindo</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-release-plugin</artifactId>
+            <version>2.5</version>
+            <configuration>
+              <arguments>-DskipITs -DskipTests -Prelease-sonatype-molindo</arguments>
+              <pushChanges>false</pushChanges>
+              <tagNameFormat>@{project.version}</tagNameFormat>
+            </configuration>
+            <dependencies>
+              <dependency>
+                <groupId>org.apache.maven.scm</groupId>
+                <artifactId>maven-scm-provider-gitexe</artifactId>
+                <version>1.9</version>
+              </dependency>
+            </dependencies>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    
     <profile>
       <id>release-no-sign</id>
       <build>
