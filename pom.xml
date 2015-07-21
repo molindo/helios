@@ -30,7 +30,7 @@
     <url>https://github.com/molindo/helios</url>
     <tag>HEAD</tag>
   </scm>
-
+<!-- 
   <distributionManagement>
     <snapshotRepository>
       <id>ossrh</id>
@@ -41,7 +41,7 @@
       <url>file:///tmp/helios-docs</url>
     </site>
   </distributionManagement>
-
+-->
   <developers>
     <developer>
       <id>dano</id>
