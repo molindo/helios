@@ -325,7 +325,7 @@
             <artifactId>maven-release-plugin</artifactId>
             <version>2.5</version>
             <configuration>
-              <arguments>-DskipITs -DskipTests -Prelease-sonatype-molindo</arguments>
+              <arguments>-DskipITs -DskipTests -Dgpg.skip=false -Prelease-sonatype-molindo</arguments>
               <pushChanges>true</pushChanges>
               <tagNameFormat>@{project.version}</tagNameFormat>
             </configuration>
