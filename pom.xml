@@ -13,7 +13,7 @@
   <url>https://github.com/molindo/helios</url>
   <groupId>at.molindo</groupId>
   <artifactId>helios-parent</artifactId>
-  <version>0.8.0-SNAPSHOT</version>
+  <version>0.9.11-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <licenses>
@@ -30,18 +30,22 @@
     <url>https://github.com/molindo/helios</url>
     <tag>HEAD</tag>
   </scm>
-
+  <ciManagement>
+    <system>TeamCity</system>
+    <url>https://oss.molindo.at/</url>
+  </ciManagement>
   <distributionManagement>
+    <repository>
+      <id>sonatype-nexus-staging</id>
+      <name>Nexus Release Repository</name>
+      <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+    </repository>
     <snapshotRepository>
-      <id>ossrh</id>
-      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+      <id>sonatype-nexus-snapshots</id>
+      <name>Sonatype Nexus Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
     </snapshotRepository>
-    <site>
-      <id>spotify.github.io</id>
-      <url>file:///tmp/helios-docs</url>
-    </site>
   </distributionManagement>
-
   <developers>
     <developer>
       <id>dano</id>
@@ -97,7 +101,26 @@
     </repository>
     <repository>
       <id>bintray-readytalk</id>
-      <url>http://dl.bintray.com/readytalk/maven</url>
+      <url>http://jcenter.bintray.com/</url>
+    </repository>
+        <repository>
+      <releases>
+        <enabled>false</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+      <id>sonatype-nexus-snapshots</id>
+      <name>Sonatype Nexus Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+    </repository>
+    <repository>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+      <id>central</id>
+      <name>Central Repository</name>
+      <url>http://repo.maven.apache.org/maven2</url>
     </repository>
   </repositories>
 
@@ -292,7 +315,32 @@
         </plugins>
       </build>
     </profile>
-
+    
+    <profile>
+      <id>release-sonatype-molindo</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-release-plugin</artifactId>
+            <version>2.5</version>
+            <configuration>
+              <arguments>-DskipITs -DskipTests -Dgpg.skip=false -Prelease-sonatype-molindo</arguments>
+              <pushChanges>true</pushChanges>
+              <tagNameFormat>@{project.version}</tagNameFormat>
+            </configuration>
+            <dependencies>
+              <dependency>
+                <groupId>org.apache.maven.scm</groupId>
+                <artifactId>maven-scm-provider-gitexe</artifactId>
+                <version>1.9</version>
+              </dependency>
+            </dependencies>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    
     <profile>
       <id>release-no-sign</id>
       <build>
@@ -411,6 +459,7 @@
           <target>1.7</target>
         </configuration>
       </plugin>
+      <!-- 
       <plugin>
         <groupId>org.sonatype.plugins</groupId>
         <artifactId>nexus-staging-maven-plugin</artifactId>
@@ -423,7 +472,7 @@
           <skipRemoteStaging>true</skipRemoteStaging>
           <stagingProgressTimeoutMinutes>10</stagingProgressTimeoutMinutes>
         </configuration>
-      </plugin>
+      </plugin>-->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-enforcer-plugin</artifactId>
