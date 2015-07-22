@@ -459,6 +459,7 @@
           <target>1.7</target>
         </configuration>
       </plugin>
+      <!-- 
       <plugin>
         <groupId>org.sonatype.plugins</groupId>
         <artifactId>nexus-staging-maven-plugin</artifactId>
@@ -471,7 +472,7 @@
           <skipRemoteStaging>true</skipRemoteStaging>
           <stagingProgressTimeoutMinutes>10</stagingProgressTimeoutMinutes>
         </configuration>
-      </plugin>
+      </plugin>-->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-enforcer-plugin</artifactId>
