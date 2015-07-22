@@ -101,7 +101,7 @@
     </repository>
     <repository>
       <id>bintray-readytalk</id>
-      <url>http://dl.bintray.com/readytalk/maven</url>
+      <url>http://jcenter.bintray.com/</url>
     </repository>
         <repository>
       <releases>
