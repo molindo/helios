@@ -300,7 +300,10 @@ public class JobCreateCommand extends ControlCommand {
       builder.setImage(imageIdentifier);
     }
 
-    builder.setHostname(options.getString(hostnameArg.getDest()));
+    final String hostname = options.getString(hostnameArg.getDest());
+    if (!isNullOrEmpty(hostname)) {
+      builder.setHostname(hostname);
+    }
 
     final List<String> command = options.getList(argsArg.getDest());
     if (command != null && !command.isEmpty()) {

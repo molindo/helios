@@ -43,7 +43,6 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-
 import com.spotify.docker.client.messages.ContainerConfig;
 import com.spotify.docker.client.messages.HostConfig;
 import com.spotify.docker.client.messages.ImageInfo;
@@ -126,6 +125,7 @@ public class TaskConfig {
     builder.image(job.getImage());
     builder.hostname(job.getHostname());
     builder.cmd(containerCmdStrings(properties));
+    builder.hostname(containerHostname(properties));
     builder.env(containerEnvStrings());
     builder.exposedPorts(containerExposedPorts());
     builder.volumes(volumes());
@@ -259,6 +259,28 @@ public class TaskConfig {
   }
 
   /**
+   * Compute docker container cmd arguments and resolve them against the hosts environment.
+   * @param properties Host environment
+   * @return The container cmd arguments.
+   */
+  private List<String> containerCmdStrings(final Map<String, String> properties) {
+    final List<String> list = Lists.newArrayListWithCapacity(job.getCommand().size());
+    for (String value : job.getCommand()) {
+      list.add(StrSubstitutor.replace(value, properties));
+    }
+    return list;
+  }
+
+  /***
+   * Get docker container hostname and resolve it against the hosts environment
+   * @param properties Host environment
+   * @return The hostname
+   */
+  private String containerHostname(final Map<String, String> properties) {
+    return StrSubstitutor.replace(job.getHostname(), properties);
+  }
+
+  /**
    * Compute docker container environment variables.
    * @return The container environment variables.
    */
@@ -269,18 +291,6 @@ public class TaskConfig {
       envList.add(entry.getKey() + '=' + entry.getValue());
     }
     return envList;
-  }
-
-  /**
-   * Compute docker container cmd arguments and resolve them against the hosts environment.
-   * @return The container cmd arguments.
-   */
-  private List<String> containerCmdStrings(final Map<String, String> properties) {
-    final List<String> list = Lists.newArrayListWithCapacity(job.getCommand().size());
-    for (String value : job.getCommand()) {
-      list.add(StrSubstitutor.replace(value, properties));
-    }
-    return list;
   }
 
   /**
