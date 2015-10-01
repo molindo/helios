@@ -192,7 +192,7 @@ public class DeploymentGroupResource {
         JobId deployedJobId = null;
         TaskStatus.State state = null;
 
-        if (hostStatus != null) {
+        if (hostStatus != null && hostStatus.getStatus().equals(HostStatus.Status.UP)) {
           for (final Map.Entry<JobId, Deployment> entry : hostStatus.getJobs().entrySet()) {
             if (name.equals(entry.getValue().getDeploymentGroupName())) {
               deployedJobId = entry.getKey();
@@ -203,9 +203,9 @@ public class DeploymentGroupResource {
               break;
             }
           }
-        }
 
-        result.add(new DeploymentGroupStatusResponse.HostStatus(host, deployedJobId, state));
+          result.add(new DeploymentGroupStatusResponse.HostStatus(host, deployedJobId, state));
+        }
       }
 
       final DeploymentGroupStatusResponse.Status status;
@@ -213,10 +213,10 @@ public class DeploymentGroupResource {
         status = DeploymentGroupStatusResponse.Status.IDLE;
       } else if (deploymentGroupStatus.getState() == DeploymentGroupStatus.State.FAILED) {
         status = DeploymentGroupStatusResponse.Status.FAILED;
-      } else if (deploymentGroupStatus.getSuccessfulIterations() > 0) {
-        status = DeploymentGroupStatusResponse.Status.ACTIVE;
-      } else {
+      } else if (deploymentGroupStatus.getState() == DeploymentGroupStatus.State.ROLLING_OUT) {
         status = DeploymentGroupStatusResponse.Status.ROLLING_OUT;
+      } else {
+        status = DeploymentGroupStatusResponse.Status.ACTIVE;
       }
 
       final String error = deploymentGroupStatus == null ? "" : deploymentGroupStatus.getError();

@@ -21,11 +21,47 @@
 
 package com.spotify.helios.common.descriptors;
 
+import com.google.common.base.Optional;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.concurrent.TimeUnit;
 
+import static com.spotify.helios.common.descriptors.Job.EMPTY_TOKEN;
+
+/**
+ * Represents a deployment group's rollout options.
+ *
+ * An sample expression of it in JSON might be:
+ * <pre>
+ * {
+ *   "name": "foo-group",
+ *   "job": "foo:0.1.0",
+ *   "hostSelectors": [
+ *     {
+ *       "label": "foo",
+ *       "operator": "EQUALS"
+ *       "operand": "bar",
+ *     },
+ *     {
+ *       "label": "baz",
+ *       "operator": "EQUALS"
+ *       "operand": "qux",
+ *     }
+ *   ],
+ *   "rolloutOptions": {
+ *     "migrate": false,
+ *     "parallelism": 2,
+ *     "timeout": 1000,
+ *     "overlap": true,
+ *     "token": "insecure-access-token"
+ *   }
+ * }
+ * </pre>
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class RolloutOptions {
 
@@ -35,13 +71,19 @@ public class RolloutOptions {
   private final long timeout;
   private final int parallelism;
   private final boolean migrate;
+  private final boolean overlap;
+  private final String token;
 
   public RolloutOptions(@JsonProperty("timeout") final long timeout,
                         @JsonProperty("parallelism") final int parallelism,
-                        @JsonProperty("migrate") final boolean migrate) {
+                        @JsonProperty("migrate") final boolean migrate,
+                        @JsonProperty("overlap") boolean overlap,
+                        @JsonProperty("token") @Nullable String token) {
     this.timeout = timeout;
     this.parallelism = parallelism;
     this.migrate = migrate;
+    this.overlap = overlap;
+    this.token = Optional.fromNullable(token).or(EMPTY_TOKEN);
   }
 
   public static Builder newBuilder() {
@@ -52,7 +94,8 @@ public class RolloutOptions {
     return new Builder()
         .setTimeout(timeout)
         .setParallelism(parallelism)
-        .setMigrate(migrate);
+        .setMigrate(migrate)
+        .setToken(token);
   }
 
   public long getTimeout() {
@@ -65,6 +108,14 @@ public class RolloutOptions {
 
   public boolean getMigrate() {
     return migrate;
+  }
+
+  public boolean getOverlap() {
+    return overlap;
+  }
+
+  public String getToken() {
+    return token;
   }
 
   @Override
@@ -87,6 +138,12 @@ public class RolloutOptions {
     if (timeout != that.timeout) {
       return false;
     }
+    if (overlap != that.overlap) {
+      return false;
+    }
+    if (token != null ? !token.equals(that.token) : that.token != null) {
+      return false;
+    }
 
     return true;
   }
@@ -96,6 +153,8 @@ public class RolloutOptions {
     int result = (int) (timeout ^ (timeout >>> 32));
     result = 31 * result + parallelism;
     result = 31 * result + (migrate ? 1 : 0);
+    result = 31 * result + (overlap ? 1 : 0);
+    result = 31 * result + (token != null ? token.hashCode() : 0);
     return result;
   }
 
@@ -105,6 +164,8 @@ public class RolloutOptions {
            "timeout=" + timeout +
            ", parallelism=" + parallelism +
            ", migrate=" + migrate +
+           ", overlap=" + overlap +
+           ", token=" + token +
            '}';
   }
 
@@ -113,11 +174,15 @@ public class RolloutOptions {
     private long timeout;
     private int parallelism;
     private boolean migrate;
+    private boolean overlap;
+    private String token;
 
     public Builder() {
       this.timeout = DEFAULT_TIMEOUT;
       this.parallelism = DEFAULT_PARALLELISM;
       this.migrate = false;
+      this.overlap = false;
+      this.token = EMPTY_TOKEN;
     }
 
 
@@ -136,9 +201,18 @@ public class RolloutOptions {
       return this;
     }
 
+    public Builder setOverlap(final boolean overlap) {
+      this.overlap = overlap;
+      return this;
+    }
+
+    public Builder setToken(final String token) {
+      this.token = token;
+      return this;
+    }
 
     public RolloutOptions build() {
-      return new RolloutOptions(timeout, parallelism, migrate);
+      return new RolloutOptions(timeout, parallelism, migrate, overlap, token);
     }
   }
 }

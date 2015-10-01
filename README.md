@@ -1,4 +1,4 @@
-Helios [![Circle CI](https://circleci.com/gh/spotify/helios/tree/master.png?style=badge)](https://circleci.com/gh/spotify/helios/tree/master)
+Helios [![Circle CI](https://circleci.com/gh/spotify/helios/tree/master.png?style=badge)](https://circleci.com/gh/spotify/helios/tree/master) [![Slack Status](http://slackin.spotify.com/badge.svg)](http://slackin.spotify.com)
 ======
 
 Helios is a Docker orchestration platform for deploying and managing
@@ -142,8 +142,7 @@ Build & Test
 ------------
 
 First, make sure you have Docker installed locally. If you're using OS X, we
-recommend using [Boot2Docker](http://boot2docker.io/) or
-[docker-machine](https://docs.docker.com/machine/).
+recommend using [docker-machine](https://docs.docker.com/machine/).
 
 Actually building Helios and running its tests should be a simple matter
 of running:

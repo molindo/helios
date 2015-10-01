@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 Spotify AB.
+ * Copyright (c) 2015 Spotify AB.
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,13 +19,27 @@
  * under the License.
  */
 
-package com.spotify.helios.agent;
+package com.spotify.helios.servicescommon;
 
-import org.joda.time.Instant;
+public class VersionedValue<T> {
 
-/**
- * Mostly for testing, but an interface that represents the system clock.
- */
-public interface Clock {
-  Instant now();
+  private final T value;
+  private final int version;
+
+  public static <T> VersionedValue<T> of(final T value, int version) {
+    return new VersionedValue<>(value, version);
+  }
+
+  public VersionedValue(final T value, final int version) {
+    this.value = value;
+    this.version = version;
+  }
+
+  public T value() {
+    return value;
+  }
+
+  public int version() {
+    return version;
+  }
 }

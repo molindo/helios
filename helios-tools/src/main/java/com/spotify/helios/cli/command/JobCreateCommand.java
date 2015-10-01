@@ -62,6 +62,7 @@ import java.util.regex.Pattern;
 import static com.google.common.base.Charsets.UTF_8;
 import static com.google.common.base.Optional.fromNullable;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.spotify.helios.common.descriptors.Job.EMPTY_TOKEN;
 import static com.spotify.helios.common.descriptors.PortMapping.TCP;
 import static com.spotify.helios.common.descriptors.ServiceEndpoint.HTTP;
 import static java.util.Arrays.asList;
@@ -127,7 +128,7 @@ public class JobCreateCommand extends ControlCommand {
 
     tokenArg = parser.addArgument("--token")
          .nargs("?")
-         .setDefault("")
+         .setDefault(EMPTY_TOKEN)
          .help("Insecure access token meant to prevent accidental changes to your job " +
                "(e.g. undeploys).");
 
@@ -229,7 +230,7 @@ public class JobCreateCommand extends ControlCommand {
     // TODO (dano): look for e.g. Heliosfile in cwd by default?
 
     final String templateJobId = options.getString(templateArg.getDest());
-    final File file = (File) options.get(fileArg.getDest());
+    final File file = options.get(fileArg.getDest());
 
     if (file != null && templateJobId != null) {
       throw new IllegalArgumentException("Please use only one of -t/--template and -f/--file");
@@ -398,7 +399,7 @@ public class JobCreateCommand extends ControlCommand {
     builder.setRegistration(registration);
 
     // Get grace period interval
-    Integer gracePeriod = options.getInt(gracePeriodArg.getDest());
+    final Integer gracePeriod = options.getInt(gracePeriodArg.getDest());
     if (gracePeriod != null) {
       builder.setGracePeriod(gracePeriod);
     }
@@ -464,11 +465,20 @@ public class JobCreateCommand extends ControlCommand {
       builder.setHealthCheck(TcpHealthCheck.of(tcpHealthCheck));
     }
 
-    builder.setSecurityOpt(options.<String>getList(securityOptArg.getDest()));
+    final List<String> securityOpt = options.getList(securityOptArg.getDest());
+    if (securityOpt != null && !securityOpt.isEmpty()) {
+      builder.setSecurityOpt(securityOpt);
+    }
 
-    builder.setNetworkMode(options.getString(networkModeArg.getDest()));
+    final String networkMode = options.getString(networkModeArg.getDest());
+    if (!isNullOrEmpty(networkMode)) {
+      builder.setNetworkMode(networkMode);
+    }
 
-    builder.setToken(options.getString(tokenArg.getDest()));
+    final String token = options.getString(tokenArg.getDest());
+    if (!isNullOrEmpty(token)) {
+      builder.setToken(token);
+    }
 
     final Job job = builder.build();
 

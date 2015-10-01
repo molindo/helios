@@ -43,6 +43,7 @@ public class Paths {
   private static final String LABELS = "labels";
   private static final String ID = "id";
   private static final String DEPLOYMENT_GROUPS = "deployment-groups";
+  private static final String DEPLOYMENT_GROUP_TASKS = "deployment-group-tasks";
 
   private static final PathFactory CONFIG_ID = new PathFactory("/", CONFIG, ID);
   private static final PathFactory CONFIG_JOBS = new PathFactory("/", CONFIG, JOBS);
@@ -55,6 +56,8 @@ public class Paths {
   private static final PathFactory STATUS_MASTERS = new PathFactory("/", STATUS, MASTERS);
   private static final PathFactory STATUS_DEPLOYMENT_GROUPS = new PathFactory(
       "/", STATUS, DEPLOYMENT_GROUPS);
+  private static final PathFactory STATUS_DEPLOYMENT_GROUP_TASKS = new PathFactory(
+      "/", STATUS, DEPLOYMENT_GROUP_TASKS);
 
   private static final PathFactory HISTORY_JOBS = new PathFactory("/", HISTORY, JOBS);
   private static final String CREATION_PREFIX = "creation-";
@@ -83,12 +86,11 @@ public class Paths {
     return CONFIG_DEPLOYMENT_GROUPS.path(name);
   }
 
-  public static boolean isConfigJobCreation(final JobId id, final String parent,
-                                            final String child) {
+  public static boolean isConfigJobCreation(final String child) {
     return child.startsWith(CREATION_PREFIX);
   }
 
-  public static UUID configJobCreationId(final JobId id, final String parent, final String child) {
+  public static UUID configJobCreationId(final String child) {
     return UUID.fromString(child.substring(CREATION_PREFIX.length()));
   }
 
@@ -204,6 +206,14 @@ public class Paths {
 
   public static String statusDeploymentGroupHosts(final String name) {
     return STATUS_DEPLOYMENT_GROUPS.path(name, HOSTS);
+  }
+
+  public static String statusDeploymentGroupTasks() {
+    return STATUS_DEPLOYMENT_GROUP_TASKS.path();
+  }
+
+  public static String statusDeploymentGroupTasks(final String deploymentGroupName) {
+    return STATUS_DEPLOYMENT_GROUP_TASKS.path(deploymentGroupName);
   }
 
   public static String historyJobHostEventsTimestamp(final JobId jobId,
