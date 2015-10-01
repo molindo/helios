@@ -46,7 +46,7 @@ import static com.spotify.helios.common.descriptors.Job.EMPTY_EXPIRES;
 import static com.spotify.helios.common.descriptors.Job.EMPTY_GRACE_PERIOD;
 import static com.spotify.helios.common.descriptors.Job.EMPTY_HEALTH_CHECK;
 import static com.spotify.helios.common.descriptors.Job.EMPTY_HOSTNAME;
-import static com.spotify.helios.common.descriptors.Job.EMPTY_NETWORK_MODE;
+import static com.spotify.helios.common.descriptors.Job.DEFAULT_NETWORK_MODE;
 import static com.spotify.helios.common.descriptors.Job.EMPTY_PORTS;
 import static com.spotify.helios.common.descriptors.Job.EMPTY_REGISTRATION;
 import static com.spotify.helios.common.descriptors.Job.EMPTY_REGISTRATION_DOMAIN;
@@ -117,6 +117,18 @@ public class JobValidatorTest {
                is(empty()));
     assertThat(validator.validate(b.setImage("registry.test.net.:80/fooo/bar").build()),
                is(empty()));
+    assertThat(
+        validator.validate(b.setImage(
+            "namespace/foo@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae")
+                               .build()), is(empty()));
+    assertThat(
+        validator.validate(b.setImage(
+            "foo.net/bar@sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae")
+                               .build()), is(empty()));
+    assertThat(
+        validator.validate(b.setImage(
+            "foo@tarsum.v1+sha256:6c3c624b58dbbcd3c0dd82b4c53f04194d1247c6eebdaab7c610cf7d66709b3b")
+                               .build()), is(empty()));
   }
 
   @Test
@@ -179,7 +191,7 @@ public class JobValidatorTest {
                             "bar", EMPTY_HOSTNAME, EMPTY_COMMAND, EMPTY_ENV, EMPTY_RESOURCES, EMPTY_PORTS,
                             EMPTY_REGISTRATION, EMPTY_GRACE_PERIOD, EMPTY_VOLUMES, EMPTY_EXPIRES,
                             EMPTY_REGISTRATION_DOMAIN, EMPTY_CREATING_USER, EMPTY_TOKEN,
-                            EMPTY_HEALTH_CHECK, EMPTY_SECURITY_OPT, EMPTY_NETWORK_MODE);
+                            EMPTY_HEALTH_CHECK, EMPTY_SECURITY_OPT, DEFAULT_NETWORK_MODE);
     final JobId recomputedId = job.toBuilder().build().getId();
     assertEquals(ImmutableSet.of("Id hash mismatch: " + job.getId().getHash()
         + " != " + recomputedId.getHash()), validator.validate(job));
@@ -220,6 +232,15 @@ public class JobValidatorTest {
 
     assertEquals(newHashSet("Tag cannot be empty"),
                  validator.validate(b.setImage("repo:").build()));
+
+    assertEquals(newHashSet("Digest cannot be empty"),
+                 validator.validate(b.setImage("foo@").build()));
+
+    assertEquals(newHashSet("Illegal digest: \":123\""),
+                 validator.validate(b.setImage("foo@:123").build()));
+
+    assertEquals(newHashSet("Illegal digest: \"sha256:\""),
+                 validator.validate(b.setImage("foo@sha256:").build()));
 
     assertFalse(validator.validate(b.setImage("repo:/").build()).isEmpty());
 
@@ -343,6 +364,48 @@ public class JobValidatorTest {
         .addPort("a", PortMapping.of(1, 1))
         .build();
     assertEquals(1, validator.validate(jobWithWrongPort).size());
+  }
+
+  @Test
+  public void testValidNetworkModesPass() {
+    Job job = Job.newBuilder()
+        .setName("foo")
+        .setVersion("1")
+        .setImage("foobar")
+        .setNetworkMode("bridge")
+        .build();
+
+    assertEquals(0, validator.validate(job).size());
+
+    job = Job.newBuilder()
+        .setName("foo")
+        .setVersion("1")
+        .setImage("foobar")
+        .setNetworkMode("host")
+        .build();
+
+    assertEquals(0, validator.validate(job).size());
+
+    job = Job.newBuilder()
+        .setName("foo")
+        .setVersion("1")
+        .setImage("foobar")
+        .setNetworkMode("container:foo")
+        .build();
+
+    assertEquals(0, validator.validate(job).size());
+  }
+
+  @Test
+  public void testInvalidNetworkModeFail() {
+    final Job job = Job.newBuilder()
+        .setName("foo")
+        .setVersion("1")
+        .setImage("foobar")
+        .setNetworkMode("chocolate")
+        .build();
+
+    assertEquals(1, validator.validate(job).size());
   }
   
   @Test

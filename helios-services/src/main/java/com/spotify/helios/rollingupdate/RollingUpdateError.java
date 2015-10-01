@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 Spotify AB.
+ * Copyright (c) 2015 Spotify AB.
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,13 +19,15 @@
  * under the License.
  */
 
-package com.spotify.helios.agent;
+package com.spotify.helios.rollingupdate;
 
-import org.joda.time.Instant;
-
-/**
- * Mostly for testing, but an interface that represents the system clock.
- */
-public interface Clock {
-  Instant now();
+public enum RollingUpdateError {
+  PORT_CONFLICT,
+  JOB_UNEXPECTEDLY_UNDEPLOYED,
+  JOB_ALREADY_DEPLOYED,
+  TIMED_OUT_WAITING_FOR_JOB_TO_REACH_RUNNING,
+  TOKEN_VERIFICATION_ERROR,
+  JOB_NOT_FOUND,
+  HOST_NOT_FOUND,
+  TIMED_OUT_RETRIEVING_JOB_STATUS
 }
