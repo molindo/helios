@@ -30,6 +30,7 @@ import com.spotify.helios.common.descriptors.Deployment;
 import com.spotify.helios.common.descriptors.HostStatus;
 import com.spotify.helios.common.descriptors.JobId;
 import com.spotify.helios.common.protocol.HostDeregisterResponse;
+import com.spotify.helios.common.protocol.HostRegisterResponse;
 import com.spotify.helios.common.protocol.JobDeployResponse;
 import com.spotify.helios.common.protocol.JobUndeployResponse;
 import com.spotify.helios.common.protocol.SetGoalResponse;
@@ -61,6 +62,8 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Response;
 
+import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.spotify.helios.common.descriptors.Job.EMPTY_TOKEN;
 import static com.spotify.helios.common.protocol.JobUndeployResponse.Status.FORBIDDEN;
 import static com.spotify.helios.common.protocol.JobUndeployResponse.Status.HOST_NOT_FOUND;
 import static com.spotify.helios.common.protocol.JobUndeployResponse.Status.INVALID_ID;
@@ -108,7 +111,11 @@ public class HostsResource {
   @Timed
   @ExceptionMetered
   public Response.Status put(@PathParam("host") final String host,
-                             @QueryParam("id") final String id) {
+                             @QueryParam("id") @DefaultValue("") final String id) {
+    if (isNullOrEmpty(id)) {
+      throw badRequest(new HostRegisterResponse(HostRegisterResponse.Status.INVALID_ID, host));
+    }
+
     model.registerHost(host, id);
     log.info("added host {}", host);
     return Response.Status.OK;
@@ -140,6 +147,7 @@ public class HostsResource {
   /**
    * Returns various status information about the host.
    * @param host The host id.
+   * @param statusFilter An optional status filter.
    * @return The host status.
    */
   @GET
@@ -147,13 +155,22 @@ public class HostsResource {
   @Produces(APPLICATION_JSON)
   @Timed
   @ExceptionMetered
-  public Optional<HostStatus> hostStatus(@PathParam("id") final String host) {
-    return Optional.fromNullable(model.getHostStatus(host));
+  public Optional<HostStatus> hostStatus(
+      @PathParam("id") final String host,
+      @QueryParam("status") @DefaultValue("") final String statusFilter) {
+    final HostStatus status = model.getHostStatus(host);
+    if (status != null &&
+        (isNullOrEmpty(statusFilter) || statusFilter.equals(status.getStatus().toString()))) {
+      return Optional.of(status);
+    } else {
+      return Optional.absent();
+    }
   }
 
   /**
    * Returns various status information about the hosts.
    * @param hosts The hosts.
+   * @param statusFilter An optional status filter.
    * @return The response.
    */
   @POST
@@ -161,12 +178,16 @@ public class HostsResource {
   @Produces(APPLICATION_JSON)
   @Timed
   @ExceptionMetered
-  public Map<String, HostStatus> hostStatuses(final List<String> hosts) {
+  public Map<String, HostStatus> hostStatuses(
+      final List<String> hosts,
+      @QueryParam("status") @DefaultValue("") final String statusFilter) {
     final Map<String, HostStatus> statuses = Maps.newHashMap();
     for (final String current : hosts) {
       final HostStatus status = model.getHostStatus(current);
       if (status != null) {
-        statuses.put(current, status);
+        if (isNullOrEmpty(statusFilter) || statusFilter.equals(status.getStatus().toString())) {
+          statuses.put(current, status);
+        }
       }
     }
     return statuses;
@@ -188,14 +209,14 @@ public class HostsResource {
   @Produces(APPLICATION_JSON)
   @Timed
   @ExceptionMetered
-  public JobDeployResponse jobPut(@PathParam("host") final String host,
-                                  @PathParam("job") final JobId jobId,
-                                  @Valid final Deployment deployment,
-                                  @RequestUser final String username,
-                                  @QueryParam("token") @DefaultValue("") final String token) {
+  public JobDeployResponse jobPut(
+      @PathParam("host") final String host,
+      @PathParam("job") final JobId jobId,
+      @Valid final Deployment deployment,
+      @RequestUser final String username,
+      @QueryParam("token") @DefaultValue(EMPTY_TOKEN) final String token) {
     if (!jobId.isFullyQualified()) {
-      throw badRequest(new JobDeployResponse(JobDeployResponse.Status.INVALID_ID, host,
-                                             jobId));
+      throw badRequest(new JobDeployResponse(JobDeployResponse.Status.INVALID_ID, host, jobId));
     }
     try {
       final Deployment actualDeployment = deployment.toBuilder().setDeployerUser(username).build();

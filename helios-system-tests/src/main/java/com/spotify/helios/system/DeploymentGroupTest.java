@@ -37,6 +37,7 @@ import com.spotify.helios.common.descriptors.Deployment;
 import com.spotify.helios.common.descriptors.DeploymentGroupStatus;
 import com.spotify.helios.common.descriptors.Goal;
 import com.spotify.helios.common.descriptors.HostStatus;
+import com.spotify.helios.common.descriptors.Job;
 import com.spotify.helios.common.descriptors.JobId;
 import com.spotify.helios.common.descriptors.JobStatus;
 import com.spotify.helios.common.descriptors.TaskStatus;
@@ -45,6 +46,7 @@ import com.spotify.helios.common.protocol.RollingUpdateResponse;
 import com.spotify.helios.master.MasterMain;
 
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -69,6 +71,7 @@ public class DeploymentGroupTest extends SystemTestBase {
 
   private static final String TEST_GROUP = "my_group";
   private static final String TEST_LABEL = "foo=bar";
+  private static final String TOKEN = "foo-token";
 
   private MasterMain master;
 
@@ -112,9 +115,19 @@ public class DeploymentGroupTest extends SystemTestBase {
       startDefaultAgent(host, "--labels", TEST_LABEL);
     }
 
+    // Wait for agents to come up
+    final HeliosClient client = defaultClient();
+    for (final String host : hosts) {
+      awaitHostStatus(client, host, UP, LONG_WAIT_SECONDS, SECONDS);
+    }
+
     // create a deployment group and job
     cli("create-deployment-group", "--json", TEST_GROUP, TEST_LABEL);
     final JobId jobId = createJob(testJobName, testJobVersion, BUSYBOX, IDLE_COMMAND);
+
+    // TODO: fix this!
+    // Wait to make sure the host-update has run
+    Thread.sleep(1000);
 
     // trigger a rolling update
     cli("rolling-update", "--async", testJobNameAndVersion, TEST_GROUP);
@@ -127,8 +140,7 @@ public class DeploymentGroupTest extends SystemTestBase {
     final Deployment deployment =
         defaultClient().hostStatus(hosts.get(0)).get().getJobs().get(jobId);
     assertEquals(TEST_GROUP, deployment.getDeploymentGroupName());
-    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP,
-                               DeploymentGroupStatus.State.DONE);
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
 
     // create a second job
     final String secondJobVersion = testJobVersion + "2";
@@ -223,8 +235,55 @@ public class DeploymentGroupTest extends SystemTestBase {
     assertEquals(TEST_GROUP, jobDeploymentGroup);
 
     // rolling-update should succeed & job should be running
-    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP,
-                               DeploymentGroupStatus.State.DONE);
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+    awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
+  }
+
+  @Test
+  public void testRollingUpdateMigrateWithToken() throws Exception {
+    final String host = testHost();
+    startDefaultAgent(host, "--labels", TEST_LABEL);
+
+    // Wait for agent to come up
+    final HeliosClient client = defaultClient();
+    awaitHostStatus(client, testHost(), UP, LONG_WAIT_SECONDS, SECONDS);
+
+    // Manually deploy a job with a token on the host (i.e. a job not part of the deployment group)
+    final Job job = Job.newBuilder()
+        .setName(testJobName)
+        .setVersion(testJobVersion)
+        .setImage(BUSYBOX)
+        .setCommand(IDLE_COMMAND)
+        .setToken(TOKEN)
+        .build();
+    final JobId jobId = createJob(job);
+    deployJob(jobId, host, TOKEN);
+    awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
+
+    // Create a deployment-group and trigger a migration rolling-update
+    cli("create-deployment-group", "--json", TEST_GROUP, TEST_LABEL);
+    cli("rolling-update", "--async", "--migrate", "--token", TOKEN, testJobNameAndVersion,
+        TEST_GROUP);
+
+    // Check that the deployment's deployment-group name eventually changes to TEST_GROUP
+    // (should be null or empty before)
+    final String jobDeploymentGroup = Polling.await(
+        LONG_WAIT_SECONDS, SECONDS, new Callable<String>() {
+          @Override
+          public String call() throws Exception {
+            final Deployment deployment =
+                defaultClient().hostStatus(host).get().getJobs().get(jobId);
+            if (deployment != null && !isNullOrEmpty(deployment.getDeploymentGroupName())) {
+              return deployment.getDeploymentGroupName();
+            } else {
+              return null;
+            }
+          }
+        });
+    assertEquals(TEST_GROUP, jobDeploymentGroup);
+
+    // rolling-update should succeed & job should be running
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
     awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
   }
 
@@ -305,7 +364,7 @@ public class DeploymentGroupTest extends SystemTestBase {
     final Map<String, MasterMain> masters = startDefaultMasters(3);
 
     final Map<String, AgentMain> agents = Maps.newLinkedHashMap();
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 20; i++) {
       final String name = TEST_HOST + i;
       agents.put(name, startDefaultAgent(name, "--labels", TEST_LABEL));
     }
@@ -398,5 +457,170 @@ public class DeploymentGroupTest extends SystemTestBase {
     cli("rolling-update", "--async", secondJobNameAndVersion, TEST_GROUP);
     awaitTaskState(secondJobId, host, TaskStatus.State.RUNNING);
     awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+  }
+
+  @Test
+  public void testRollingUpdateWithOverlap() throws Exception {
+    final List<String> hosts = ImmutableList.of(
+        "dc1-" + testHost() + "-a1.dc1.example.com",
+        "dc1-" + testHost() + "-a2.dc1.example.com",
+        "dc2-" + testHost() + "-a1.dc2.example.com",
+        "dc2-" + testHost() + "-a3.dc2.example.com",
+        "dc3-" + testHost() + "-a4.dc3.example.com"
+    );
+    // start agents
+    for (final String host : hosts) {
+      startDefaultAgent(host, "--labels", TEST_LABEL);
+    }
+
+    // create a deployment group
+    cli("create-deployment-group", "--json", TEST_GROUP, TEST_LABEL);
+
+    // create and roll out a first job
+    final JobId jobId = createJob(testJobName, testJobVersion, BUSYBOX, IDLE_COMMAND);
+    cli("rolling-update", "--async", "--overlap", testJobNameAndVersion, TEST_GROUP);
+
+    for (final String host : hosts) {
+      awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
+    }
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+
+    // create and roll out a second job
+    final String secondJobVersion = testJobVersion + "2";
+    final String secondJobNameAndVersion = testJobNameAndVersion + "2";
+    final JobId secondJobId = createJob(testJobName, secondJobVersion, BUSYBOX, IDLE_COMMAND);
+    cli("rolling-update", "--async", "--overlap", secondJobNameAndVersion, TEST_GROUP);
+
+    for (final String host : hosts) {
+      awaitTaskState(secondJobId, host, TaskStatus.State.RUNNING);
+    }
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+  }
+
+  @Ignore
+  @Test
+  public void testRollingUpdatePerformance() throws Exception {
+    final List<String> hosts = ImmutableList.of(
+        "dc1-" + testHost() + "-a1.dc1.example.com",
+        "dc1-" + testHost() + "-a2.dc1.example.com",
+        "dc2-" + testHost() + "-a1.dc2.example.com",
+        "dc2-" + testHost() + "-a3.dc2.example.com",
+        "dc3-" + testHost() + "-a4.dc3.example.com"
+    );
+
+    // start agents
+    for (final String host : hosts) {
+      startDefaultAgent(host, "--labels", TEST_LABEL);
+    }
+
+    // Wait for agents to come up
+    final HeliosClient client = defaultClient();
+    for (final String host : hosts) {
+      awaitHostStatus(client, host, UP, LONG_WAIT_SECONDS, SECONDS);
+    }
+
+    for (int i = 0; i < 50; ++i) {
+      cli("create-deployment-group", "--json", TEST_GROUP + "-" + i, "tol=ahdsksajd");
+      cli("rolling-update", "--async", testJobNameAndVersion, TEST_GROUP + "-" + i);
+    }
+
+    // create a deployment group and job
+    cli("create-deployment-group", "--json", TEST_GROUP, TEST_LABEL);
+    final JobId jobId = createJob(testJobName, testJobVersion, BUSYBOX, IDLE_COMMAND);
+
+    // TODO: fix this!
+    // Wait for the host-updater
+    Thread.sleep(2000);
+
+    // trigger a rolling update
+    cli("rolling-update", "--async", testJobNameAndVersion, TEST_GROUP);
+
+    final long t0 = System.currentTimeMillis();
+
+    // ensure the job is running on all agents and the deployment group reaches DONE
+    for (final String host : hosts) {
+      awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
+    }
+
+    final Deployment deployment =
+        defaultClient().hostStatus(hosts.get(0)).get().getJobs().get(jobId);
+    assertEquals(TEST_GROUP, deployment.getDeploymentGroupName());
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP,
+                               DeploymentGroupStatus.State.DONE);
+
+    System.out.printf("1 active / 0 inactive: Time to roll out: %.2f s\n",
+                      (System.currentTimeMillis() - t0) / 1000.0);
+  }
+
+  @Test
+  public void testRollingUpdateWithOverlapAndParallelism() throws Exception {
+    // create and start agents
+    final List<String> hosts = ImmutableList.of(
+        "dc1-" + testHost() + "-a1.dc1.example.com",
+        "dc1-" + testHost() + "-a2.dc1.example.com",
+        "dc2-" + testHost() + "-a1.dc2.example.com",
+        "dc2-" + testHost() + "-a3.dc2.example.com",
+        "dc3-" + testHost() + "-a4.dc3.example.com"
+    );
+    for (final String host : hosts) {
+      startDefaultAgent(host, "--labels", TEST_LABEL);
+    }
+
+    // create a deployment group
+    cli("create-deployment-group", "--json", TEST_GROUP, TEST_LABEL);
+
+    // create and roll out a first job
+    final JobId jobId = createJob(testJobName, testJobVersion, BUSYBOX, IDLE_COMMAND);
+    cli("rolling-update", "--async", "-p", "2", "--overlap", testJobNameAndVersion, TEST_GROUP);
+
+    for (final String host : hosts) {
+      awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
+    }
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+
+    // create and roll out a second job
+    final String secondJobVersion = testJobVersion + "2";
+    final String secondJobNameAndVersion = testJobNameAndVersion + "2";
+    final JobId secondJobId = createJob(testJobName, secondJobVersion, BUSYBOX, IDLE_COMMAND);
+    cli("rolling-update", "--async", "-p", "2", "--overlap", secondJobNameAndVersion, TEST_GROUP);
+
+    for (final String host : hosts) {
+      awaitTaskState(secondJobId, host, TaskStatus.State.RUNNING);
+    }
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+  }
+
+  @Test
+  public void testRollingUpdateWithToken() throws Exception {
+    final String host = testHost();
+    startDefaultAgent(host, "--labels", TEST_LABEL);
+
+    // Wait for agent to come up
+    final HeliosClient client = defaultClient();
+    awaitHostStatus(client, testHost(), UP, LONG_WAIT_SECONDS, SECONDS);
+
+    // Manually deploy a job with a token on the host (i.e. a job not part of the deployment group)
+    final Job job = Job.newBuilder()
+        .setName(testJobName)
+        .setVersion(testJobVersion)
+        .setImage(BUSYBOX)
+        .setCommand(IDLE_COMMAND)
+        .setToken(TOKEN)
+        .build();
+    final JobId jobId = createJob(job);
+
+    // Create a deployment-group and trigger a migration rolling-update
+    cli("create-deployment-group", "--json", TEST_GROUP, TEST_LABEL);
+    cli("rolling-update", "--async", "--token", TOKEN, testJobNameAndVersion, TEST_GROUP);
+
+    // rolling-update should succeed & job should be running
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+    awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
+
+    // Check that we cannot manually undeploy the job with a token
+    final String output = cli("undeploy", jobId.toString(), host);
+    assertThat(output, containsString("FORBIDDEN"));
+    awaitDeploymentGroupStatus(defaultClient(), TEST_GROUP, DeploymentGroupStatus.State.DONE);
+    awaitTaskState(jobId, host, TaskStatus.State.RUNNING);
   }
 }

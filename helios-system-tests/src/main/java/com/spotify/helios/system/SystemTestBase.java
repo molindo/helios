@@ -146,6 +146,8 @@ public abstract class SystemTestBase {
   public static final int LONG_WAIT_SECONDS = 400;
 
   public static final String BUSYBOX = "busybox:latest";
+  public static final String BUSYBOX_WITH_DIGEST =
+      "busybox@sha256:16a2a52884c2a9481ed267c2d46483eac7693b813a63132368ab098a71303f8a";
   public static final String NGINX = "rohan/nginx-alpine:latest";
   public static final String UHTTPD = "fnichol/docker-uhttpd:latest";
   public static final String ALPINE = "onescience/alpine:latest";
@@ -756,9 +758,19 @@ public abstract class SystemTestBase {
     return cli("create", args);
   }
 
-  protected void deployJob(final JobId jobId, final String host)
+  protected void deployJob(final JobId jobId, final String host) throws Exception {
+    deployJob(jobId, host, null);
+  }
+
+  protected void deployJob(final JobId jobId, final String host, final String token)
       throws Exception {
-    final String deployOutput = cli("deploy", jobId.toString(), host);
+    final List<String> deployArgs = Lists.newArrayList(jobId.toString(), host);
+
+    if (token != null) {
+      deployArgs.addAll(ImmutableList.of("--token", token));
+    }
+
+    final String deployOutput = cli("deploy", deployArgs);
     assertThat(deployOutput, containsString(host + ": done"));
 
     final String output = cli("status", "--host", host, "--json");
@@ -777,8 +789,7 @@ public abstract class SystemTestBase {
         Json.readUnchecked(output, new TypeReference<Map<JobId, JobStatus>>() {
         });
     final JobStatus status = statuses.get(jobId);
-    assertTrue(status == null ||
-               status.getDeployments().get(host) == null);
+    assertTrue(status == null || status.getDeployments().get(host) == null);
   }
 
   protected String startJob(final JobId jobId, final String host) throws Exception {

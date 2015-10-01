@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 Spotify AB.
+ * Copyright (c) 2015 Spotify AB.
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,13 +19,30 @@
  * under the License.
  */
 
-package com.spotify.helios.agent;
+package com.spotify.helios.rollingupdate;
 
-import org.joda.time.Instant;
+import com.google.common.collect.ImmutableList;
 
-/**
- * Mostly for testing, but an interface that represents the system clock.
- */
-public interface Clock {
-  Instant now();
+import com.spotify.helios.servicescommon.coordination.ZooKeeperOperation;
+
+import java.util.Map;
+
+public class RollingUpdateOp {
+
+  private final ImmutableList<ZooKeeperOperation> operations;
+  private final ImmutableList<Map<String, Object>> events;
+
+  public RollingUpdateOp(final ImmutableList<ZooKeeperOperation> operations,
+                         final ImmutableList<Map<String, Object>> events) {
+    this.operations = operations;
+    this.events = events;
+  }
+
+  public ImmutableList<ZooKeeperOperation> operations() {
+    return operations;
+  }
+
+  public ImmutableList<Map<String, Object>> events() {
+    return events;
+  }
 }

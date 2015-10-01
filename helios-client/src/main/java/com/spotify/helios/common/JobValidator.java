@@ -22,6 +22,7 @@
 package com.spotify.helios.common;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
 
 import com.spotify.helios.common.descriptors.ExecHealthCheck;
@@ -67,6 +68,8 @@ public class JobValidator {
   public static final Pattern PORT_MAPPING_PROTO_PATTERN = compile("(tcp|udp)");
   public static final Pattern PORT_MAPPING_NAME_PATTERN = compile("\\S+");
   public static final Pattern REGISTRATION_NAME_PATTERN = compile("[_\\-\\w]+");
+
+  public static final List<String> VALID_NETWORK_MODES = ImmutableList.of("bridge", "host");
 
   public Set<String> validate(final Job job) {
     final Set<String> errors = Sets.newHashSet();
@@ -144,6 +147,7 @@ public class JobValidator {
     }
 
     errors.addAll(validateJobHealthCheck(job));
+    errors.addAll(validateJobNetworkMode(job));
 
     return errors;
   }
@@ -283,9 +287,16 @@ public class JobValidator {
 
     final String repo;
     final String tag;
+    final String digest;
 
+    final int lastAtSign = imageRef.lastIndexOf('@');
     final int lastColon = imageRef.lastIndexOf(':');
-    if (lastColon != -1 && !(tag = imageRef.substring(lastColon + 1)).contains("/")) {
+
+    if (lastAtSign != -1) {
+      repo = imageRef.substring(0, lastAtSign);
+      digest = imageRef.substring(lastAtSign + 1);
+      valid &= validateDigest(digest, errors);
+    } else if (lastColon != -1 && !(tag = imageRef.substring(lastColon + 1)).contains("/")) {
       repo = imageRef.substring(0, lastColon);
       valid &= validateTag(tag, errors);
     } else {
@@ -333,6 +344,23 @@ public class JobValidator {
       valid = false;
     }
     return valid;
+  }
+
+  private boolean validateDigest(final String digest, final Collection<String> errors) {
+    if (digest.isEmpty()) {
+      errors.add("Digest cannot be empty");
+      return false;
+    }
+
+    final int firstColon = digest.indexOf(':');
+    final int lastColon = digest.lastIndexOf(':');
+
+    if ((firstColon <= 0 ) || (firstColon != lastColon) || (firstColon == digest.length() - 1)) {
+      errors.add(format("Illegal digest: \"%s\"", digest));
+      return false;
+    }
+
+    return true;
   }
 
   private boolean validateEndpoint(final String endpoint, final Collection<String> errors) {
@@ -426,6 +454,29 @@ public class JobValidator {
         errors.add(format("Health check port '%s' not defined in the job. Known ports are '%s'",
                           port, Joiner.on(", ").join(ports.keySet())));
       }
+    }
+
+    return errors;
+  }
+
+  /**
+   * Validate the Job's network mode.
+   * @param job The Job to check.
+   * @return A set of error Strings
+   */
+  private Set<String> validateJobNetworkMode(final Job job) {
+    final String networkMode = job.getNetworkMode();
+
+    if (networkMode == null) {
+      return Collections.emptySet();
+    }
+
+    final Set<String> errors = Sets.newHashSet();
+
+    if (!VALID_NETWORK_MODES.contains(networkMode) && !networkMode.startsWith("container:")) {
+      errors.add(String.format(
+          "A Docker container's network mode must be %s, or container:<name|id>.",
+          Joiner.on(", ").join(VALID_NETWORK_MODES)));
     }
 
     return errors;

@@ -21,22 +21,24 @@
 
 package com.spotify.helios.master;
 
+import com.google.common.base.Function;
+import com.google.common.base.Optional;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonMappingException;
 import com.spotify.helios.common.HeliosRuntimeException;
 import com.spotify.helios.common.Json;
 import com.spotify.helios.common.descriptors.AgentInfo;
 import com.spotify.helios.common.descriptors.Deployment;
 import com.spotify.helios.common.descriptors.DeploymentGroup;
-import com.spotify.helios.common.descriptors.DeploymentGroupEvent;
 import com.spotify.helios.common.descriptors.DeploymentGroupStatus;
+import com.spotify.helios.common.descriptors.DeploymentGroupTasks;
 import com.spotify.helios.common.descriptors.Goal;
 import com.spotify.helios.common.descriptors.HostInfo;
 import com.spotify.helios.common.descriptors.HostStatus;
@@ -49,9 +51,17 @@ import com.spotify.helios.common.descriptors.RolloutTask;
 import com.spotify.helios.common.descriptors.Task;
 import com.spotify.helios.common.descriptors.TaskStatus;
 import com.spotify.helios.common.descriptors.TaskStatusEvent;
+import com.spotify.helios.rollingupdate.DefaultRolloutPlanner;
+import com.spotify.helios.rollingupdate.DeploymentGroupEventFactory;
+import com.spotify.helios.rollingupdate.DeploymentGroupEventFactory.RollingUpdateReason;
+import com.spotify.helios.rollingupdate.RollingUpdateError;
+import com.spotify.helios.rollingupdate.RollingUpdateOp;
+import com.spotify.helios.rollingupdate.RollingUpdateOpFactory;
 import com.spotify.helios.rollingupdate.RolloutPlanner;
 import com.spotify.helios.servicescommon.KafkaRecord;
 import com.spotify.helios.servicescommon.KafkaSender;
+import com.spotify.helios.servicescommon.VersionedValue;
+import com.spotify.helios.servicescommon.ZooKeeperRegistrarUtil;
 import com.spotify.helios.servicescommon.coordination.Node;
 import com.spotify.helios.servicescommon.coordination.Paths;
 import com.spotify.helios.servicescommon.coordination.ZooKeeperClient;
@@ -75,26 +85,25 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
-import static com.google.common.base.Charsets.UTF_8;
+import static com.google.common.base.Objects.firstNonNull;
 import static com.google.common.base.Optional.fromNullable;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Lists.reverse;
-import static com.spotify.helios.common.descriptors.DeploymentGroupStatus.State.DONE;
 import static com.spotify.helios.common.descriptors.DeploymentGroupStatus.State.FAILED;
-import static com.spotify.helios.common.descriptors.DeploymentGroupStatus.State.PLANNING_ROLLOUT;
-import static com.spotify.helios.common.descriptors.DeploymentGroupStatus.State.ROLLING_OUT;
-import static com.spotify.helios.common.descriptors.DeploymentGroupStatus.State.START_ROLLING_UPDATE;
 import static com.spotify.helios.common.descriptors.Descriptor.parse;
 import static com.spotify.helios.common.descriptors.HostStatus.Status.DOWN;
 import static com.spotify.helios.common.descriptors.HostStatus.Status.UP;
+import static com.spotify.helios.rollingupdate.DeploymentGroupEventFactory.RollingUpdateReason.HOSTS_CHANGED;
+import static com.spotify.helios.rollingupdate.DeploymentGroupEventFactory.RollingUpdateReason.MANUAL;
 import static com.spotify.helios.servicescommon.coordination.ZooKeeperOperations.check;
 import static com.spotify.helios.servicescommon.coordination.ZooKeeperOperations.create;
 import static com.spotify.helios.servicescommon.coordination.ZooKeeperOperations.delete;
 import static com.spotify.helios.servicescommon.coordination.ZooKeeperOperations.set;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
+import static java.util.Collections.singletonList;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 /**
@@ -130,6 +139,10 @@ public class ZooKeeperMasterModel implements MasterModel {
   public static final TypeReference<List<String>>
       STRING_LIST_TYPE =
       new TypeReference<List<String>>() {};
+
+  private static final String DEPLOYMENT_GROUP_EVENTS_KAFKA_TOPIC = "HeliosDeploymentGroupEvents";
+  private static final DeploymentGroupEventFactory DEPLOYMENT_GROUP_EVENT_FACTORY =
+      new DeploymentGroupEventFactory();
 
   private final ZooKeeperClientProvider provider;
   private final String name;
@@ -169,19 +182,7 @@ public class ZooKeeperMasterModel implements MasterModel {
     log.info("registering host: {}", host);
     final ZooKeeperClient client = provider.get("registerHost");
     try {
-      // TODO (dano): this code is replicated in AgentZooKeeperRegistrar
-
-      // This would've been nice to do in a transaction but PathChildrenCache ensures paths
-      // so we can't know what paths already exist so assembling a suitable transaction is too
-      // painful.
-      client.ensurePath(Paths.configHost(host));
-      client.ensurePath(Paths.configHostJobs(host));
-      client.ensurePath(Paths.configHostPorts(host));
-      client.ensurePath(Paths.statusHost(host));
-      client.ensurePath(Paths.statusHostJobs(host));
-
-      // Finish registration by creating the id node last
-      client.createAndSetData(Paths.configHostId(host), id.getBytes(UTF_8));
+      ZooKeeperRegistrarUtil.registerHost(client, Paths.configHostId(host), host, id);
     } catch (Exception e) {
       throw new HeliosRuntimeException("registering host " + host + " failed", e);
     }
@@ -229,92 +230,8 @@ public class ZooKeeperMasterModel implements MasterModel {
   @Override
   public void deregisterHost(final String host)
       throws HostNotFoundException, HostStillInUseException {
-    log.info("deregistering host: {}", host);
     final ZooKeeperClient client = provider.get("deregisterHost");
-    // TODO (dano): handle retry failures
-    try {
-      final List<ZooKeeperOperation> operations = Lists.newArrayList();
-
-      // Remove all jobs deployed to this host
-      final List<JobId> jobs = listHostJobs(client, host);
-
-      if (jobs == null) {
-        if (client.exists(Paths.configHost(host)) == null) {
-          throw new HostNotFoundException("host [" + host + "] does not exist");
-        }
-      }
-
-      if (jobs != null) {
-        for (final JobId job : jobs) {
-          final String hostJobPath = Paths.configHostJob(host, job);
-
-          final List<String> nodes = safeListRecursive(client, hostJobPath);
-          for (final String node : reverse(nodes)) {
-            operations.add(delete(node));
-          }
-          if (client.exists(Paths.configJobHost(job, host)) != null) {
-            operations.add(delete(Paths.configJobHost(job, host)));
-          }
-          // Clean out the history for each job
-          final List<String> history = safeListRecursive(client, Paths.historyJobHost(job, host));
-          for (final String s : reverse(history)) {
-            operations.add(delete(s));
-          }
-        }
-      }
-      operations.add(delete(Paths.configHostJobs(host)));
-
-      // Remove the host status
-      final List<String> nodes = safeListRecursive(client, Paths.statusHost(host));
-      for (final String node : reverse(nodes)) {
-        operations.add(delete(node));
-      }
-
-      // Remove port allocations
-      final List<String> ports = safeGetChildren(client, Paths.configHostPorts(host));
-      for (final String port : ports) {
-        operations.add(delete(Paths.configHostPort(host, Integer.valueOf(port))));
-      }
-      operations.add(delete(Paths.configHostPorts(host)));
-
-      // Remove host id
-      final String idPath = Paths.configHostId(host);
-      if (client.exists(idPath) != null) {
-        operations.add(delete(idPath));
-      }
-
-      // Remove host config root
-      operations.add(delete(Paths.configHost(host)));
-
-      client.transaction(operations);
-    } catch (NotEmptyException e) {
-      final HostStatus hostStatus = getHostStatus(host);
-      final List<JobId> jobs = hostStatus != null
-                               ? ImmutableList.copyOf(hostStatus.getJobs().keySet())
-                               : Collections.<JobId>emptyList();
-      throw new HostStillInUseException(host, jobs);
-    } catch (NoNodeException e) {
-      throw new HostNotFoundException(host);
-    } catch (KeeperException e) {
-      throw new HeliosRuntimeException(e);
-    }
-  }
-
-  private List<String> safeGetChildren(final ZooKeeperClient client, final String path) {
-    try {
-      return client.getChildren(path);
-    } catch (KeeperException ignore) {
-      return ImmutableList.of();
-    }
-  }
-
-  private List<String> safeListRecursive(final ZooKeeperClient client, final String path)
-      throws KeeperException {
-    try {
-      return client.listRecursive(path);
-    } catch (NoNodeException e) {
-      return ImmutableList.of();
-    }
+    ZooKeeperRegistrarUtil.deregisterHost(client, host);
   }
 
   /**
@@ -353,18 +270,30 @@ public class ZooKeeperMasterModel implements MasterModel {
   }
 
   /**
-   * Given a jobId, returns the N most recent events in it's history in the cluster.
+   * Given a jobId, returns the N most recent events in its history in the cluster.
    */
   @Override
   public List<TaskStatusEvent> getJobHistory(final JobId jobId) throws JobDoesNotExistException {
+    return getJobHistory(jobId, null);
+  }
+
+  /**
+   * Given a jobId and host, returns the N most recent events in its history on that host in the
+   * cluster.
+   */
+  @Override
+  public List<TaskStatusEvent> getJobHistory(final JobId jobId, final String host)
+      throws JobDoesNotExistException {
     final Job descriptor = getJob(jobId);
     if (descriptor == null) {
       throw new JobDoesNotExistException(jobId);
     }
     final ZooKeeperClient client = provider.get("getJobHistory");
     final List<String> hosts;
+
     try {
-      hosts = client.getChildren(Paths.historyJobHosts(jobId));
+      hosts = (!isNullOrEmpty(host)) ? singletonList(host) :
+              client.getChildren(Paths.historyJobHosts(jobId));
     } catch (NoNodeException e) {
       return emptyList();
     } catch (KeeperException e) {
@@ -373,10 +302,10 @@ public class ZooKeeperMasterModel implements MasterModel {
 
     final List<TaskStatusEvent> jsEvents = Lists.newArrayList();
 
-    for (String host : hosts) {
+    for (String h : hosts) {
       final List<String> events;
       try {
-        events = client.getChildren(Paths.historyJobHostEvents(jobId, host));
+        events = client.getChildren(Paths.historyJobHostEvents(jobId, h));
       } catch (NoNodeException e) {
         continue;
       } catch (KeeperException e) {
@@ -386,9 +315,9 @@ public class ZooKeeperMasterModel implements MasterModel {
       for (String event : events) {
         try {
           byte[] data = client.getData(Paths.historyJobHostEventsTimestamp(
-              jobId, host, Long.valueOf(event)));
+              jobId, h, Long.valueOf(event)));
           final TaskStatus status = Json.read(data, TaskStatus.class);
-          jsEvents.add(new TaskStatusEvent(status, Long.valueOf(event), host));
+          jsEvents.add(new TaskStatusEvent(status, Long.valueOf(event), h));
         } catch (NoNodeException e) { // ignore, it went away before we read it
         } catch (KeeperException | IOException e) {
           throw Throwables.propagate(e);
@@ -463,12 +392,50 @@ public class ZooKeeperMasterModel implements MasterModel {
   }
 
   @Override
-  public void updateDeploymentGroupHosts(String name, List<String> hosts)
+  public void updateDeploymentGroupHosts(final String name, final List<String> hosts)
       throws DeploymentGroupDoesNotExistException {
     log.debug("updating deployment-group hosts: name={}", name);
     final ZooKeeperClient client = provider.get("updateDeploymentGroupHosts");
     try {
-      client.setData(Paths.statusDeploymentGroupHosts(name), Json.asBytes(hosts));
+      Optional<Integer> version = Optional.absent();
+      List<String> curHosts;
+      try {
+        final Node node = client.getNode(Paths.statusDeploymentGroupHosts(name));
+        version = Optional.of(node.getStat().getVersion());
+        curHosts = Json.read(node.getBytes(), new TypeReference<List<String>>() {});
+      } catch (NoNodeException | JsonMappingException e) {
+        curHosts = Collections.emptyList();
+      }
+
+      if (!version.isPresent() || !hosts.equals(curHosts)) {
+        // Node not present or hosts have changed
+        final List<ZooKeeperOperation> ops = Lists.newArrayList();
+        ops.add(set(Paths.statusDeploymentGroupHosts(name), Json.asBytes(hosts)));
+
+        client.ensurePath(Paths.statusDeploymentGroup(name));
+        client.ensurePath(Paths.statusDeploymentGroupTasks(name));
+        final DeploymentGroup deploymentGroup = getDeploymentGroup(name);
+        ImmutableList<Map<String, Object>> events = ImmutableList.of();
+
+        if (deploymentGroup.getJobId() != null) {
+          final DeploymentGroupStatus deploymentGroupStatus = getDeploymentGroupStatus(name);
+          if (deploymentGroupStatus == null || deploymentGroupStatus.getState() != FAILED) {
+            final RollingUpdateOp op =
+                getInitRollingUpdateOps(deploymentGroup, hosts, HOSTS_CHANGED);
+            ops.addAll(op.operations());
+            events = op.events();
+          }
+        }
+
+        client.transaction(ops);
+
+        if (kafkaSender != null) {
+          for (final Map<String, Object> event : events) {
+            kafkaSender.send(KafkaRecord.of(
+                DEPLOYMENT_GROUP_EVENTS_KAFKA_TOPIC, Json.asBytesUnchecked(event)));
+          }
+        }
+      }
     } catch (NoNodeException e) {
       throw new DeploymentGroupDoesNotExistException(name, e);
     } catch (KeeperException | IOException e) {
@@ -497,24 +464,20 @@ public class ZooKeeperMasterModel implements MasterModel {
     final List<ZooKeeperOperation> operations = Lists.newArrayList();
     final ZooKeeperClient client = provider.get("rollingUpdate");
 
-    operations.add(set(Paths.configDeploymentGroup(deploymentGroup.getName()), updated));
-
-    final String statusPath = Paths.statusDeploymentGroup(deploymentGroup.getName());
-    final DeploymentGroupStatus initialStatus = DeploymentGroupStatus.newBuilder()
-        .setDeploymentGroup(deploymentGroup)
-        .setState(START_ROLLING_UPDATE)
-        .build();
-    operations.add(set(statusPath, initialStatus));
+    operations.add(set(Paths.configDeploymentGroup(updated.getName()), updated));
+    final RollingUpdateOp op = getInitRollingUpdateOps(updated, MANUAL);
+    operations.addAll(op.operations());
 
     try {
-      client.ensurePath(statusPath);
+      client.ensurePath(Paths.statusDeploymentGroup(updated.getName()));
+      client.ensurePath(Paths.statusDeploymentGroupTasks(updated.getName()));
       client.transaction(operations);
 
       if (kafkaSender != null) {
-        final DeploymentGroupEvent event = DeploymentGroupEvent.newBuilder()
-            .setDeploymentGroupStatus(initialStatus)
-            .build();
-        kafkaSender.send(KafkaRecord.of(DeploymentGroupEvent.KAFKA_TOPIC, event.toJsonBytes()));
+        for (final Map<String, Object> event : op.events()) {
+          kafkaSender.send(KafkaRecord.of(
+              DEPLOYMENT_GROUP_EVENTS_KAFKA_TOPIC, Json.asBytesUnchecked(event)));
+        }
       }
     } catch (final NoNodeException e) {
       throw new DeploymentGroupDoesNotExistException(deploymentGroup.getName());
@@ -524,244 +487,210 @@ public class ZooKeeperMasterModel implements MasterModel {
     }
   }
 
-  @Override
-  public void rollingUpdateStep(final DeploymentGroup deploymentGroup,
-                                final RolloutPlanner rolloutPlanner)
+  private RollingUpdateOp getInitRollingUpdateOps(final DeploymentGroup deploymentGroup,
+                                                  final RollingUpdateReason reason)
       throws DeploymentGroupDoesNotExistException {
-    checkNotNull(deploymentGroup, "deploymentGroup");
+    final List<String> hosts = getDeploymentGroupHosts(deploymentGroup.getName());
+    return getInitRollingUpdateOps(deploymentGroup, hosts, reason);
+  }
 
-    log.debug("rolling-update step on deployment-group: name={}", deploymentGroup.getName());
-
-    final ZooKeeperClient client = provider.get("rollingUpdateStep");
-    final String statusPath = Paths.statusDeploymentGroup(deploymentGroup.getName());
-    final DeploymentGroupStatus status = getDeploymentGroupStatus(deploymentGroup.getName());
-
-    if (status == null) {
-      // The rolling-update command hasn't been called yet for this deployment group.
-      // The deployment group status doesn't exist yet and there's nothing to do.
-      return;
+  private RollingUpdateOp getInitRollingUpdateOps(final DeploymentGroup deploymentGroup,
+                                                  final List<String> hosts,
+                                                  final RollingUpdateReason reason) {
+    final Map<String, HostStatus> hostsAndStatuses = Maps.newLinkedHashMap();
+    for (final String host : hosts) {
+      hostsAndStatuses.put(host, getHostStatus(host));
     }
 
-    final RolloutOpsEvents opsEvents = new RolloutOpsEvents();
+    final RolloutPlanner rolloutPlanner = DefaultRolloutPlanner.of(deploymentGroup);
+    final List<RolloutTask> rolloutTasks = rolloutPlanner.plan(hostsAndStatuses);
+    final DeploymentGroupTasks tasks = DeploymentGroupTasks.newBuilder()
+        .setRolloutTasks(rolloutTasks)
+        .setTaskIndex(0)
+        .setDeploymentGroup(deploymentGroup)
+        .build();
 
-    final DeploymentGroupStatus.State state = status.getState();
-    if (state.equals(START_ROLLING_UPDATE) || state.equals(PLANNING_ROLLOUT)) {
-      // generate the rollout plan and proceed to ROLLING_OUT
-      final Map<String, HostStatus> hostsAndStatuses = Maps.newLinkedHashMap();
-      for (final String host: getDeploymentGroupHosts(deploymentGroup.getName())) {
-        hostsAndStatuses.put(host, getHostStatus(host));
-      }
+    final RollingUpdateOpFactory opFactory = new RollingUpdateOpFactory(
+        tasks, DEPLOYMENT_GROUP_EVENT_FACTORY);
+    return opFactory.start(deploymentGroup, reason);
+  }
 
-      final List<RolloutTask> oldPlan = status.getRolloutTasks();
-      final List<RolloutTask> newPlan = rolloutPlanner.plan(hostsAndStatuses);
-
-      final DeploymentGroupStatus.Builder newStatus = status.toBuilder()
-          .setState(ROLLING_OUT)
-          .setRolloutTasks(newPlan)
-          .setTaskIndex(0);
-
-      if (!Objects.equals(oldPlan, newPlan)) {
-        // if our plan changes (because hosts have been added or removed), reset
-        // the successful iteration counter (since our new plan has never been successful)
-        newStatus.setSuccessfulIterations(0);
-      }
-
-      opsEvents.addOperation(set(statusPath, newStatus.build()));
-    } else if (status.getState().equals(ROLLING_OUT)) {
-      // grab the current task off the rollout task list and execute it
-      opsEvents.addAll(getRolloutOperations(deploymentGroup, status));
-    } else if (status.getState().equals(DONE)) {
-      if (status.getSuccessfulIterations() == 1) {
-        // this is the first successful iteration
-        opsEvents.addEvent(DeploymentGroupEvent.newBuilder()
-                               .setDeploymentGroupStatus(status)
-                               .build());
-      }
-
-      // after DONE, go to PLANNING_ROLLOUT
-      opsEvents.addOperation(set(statusPath, status.toBuilder()
-          .setState(PLANNING_ROLLOUT)
-          .build()));
-    }
-
-    if (opsEvents.getOperations().isEmpty()) {
-      return;
-    }
-
+  private Map<String, VersionedValue<DeploymentGroupTasks>> getDeploymentGroupTasks(
+      final ZooKeeperClient client) {
+    final String folder = Paths.statusDeploymentGroupTasks();
     try {
-      final List<ZooKeeperOperation> zkOperations = opsEvents.getOperations();
-      client.transaction(Lists.asList(
-          check(statusPath, status.getVersion()),
-          zkOperations.toArray(new ZooKeeperOperation[zkOperations.size()])
-      ));
+      final List<String> names;
+      try {
+        names = client.getChildren(folder);
+      } catch (NoNodeException e) {
+        return Collections.emptyMap();
+      }
 
-      if (kafkaSender != null) {
-        for (final DeploymentGroupEvent event : opsEvents.getEvents()) {
-          kafkaSender.send(KafkaRecord.of(DeploymentGroupEvent.KAFKA_TOPIC, event.toJsonBytes()));
+      final Map<String, VersionedValue<DeploymentGroupTasks>> ret = Maps.newHashMap();
+      for (final String name : names) {
+        final String path = Paths.statusDeploymentGroupTasks(name);
+        try {
+          final Node node = client.getNode(path);
+          final byte[] data = node.getBytes();
+          final int version = node.getStat().getVersion();
+          if (data.length == 0) {
+            // This can happen because of ensurePath creates an empty node
+            log.debug("Ignoring empty deployment group tasks {}", name);
+          } else {
+            final DeploymentGroupTasks val = parse(data, DeploymentGroupTasks.class);
+            ret.put(name, VersionedValue.of(val, version));
+          }
+        } catch (NoNodeException e) {
+          // Ignore, the deployment group was deleted before we had a chance to read it.
+          log.debug("Ignoring deleted deployment group tasks {}", name);
         }
       }
-    } catch (final KeeperException e) {
-      if (e instanceof KeeperException.BadVersionException) {
-        // some other master beat us in processing this rolling update step. not exceptional.
-        // ideally we would check the path in the exception, but curator doesn't provide a path
-        // for exceptions thrown as part of a transaction.
-        log.debug("error saving rolling-update operations: {}", e);
-      } else {
-        throw new HeliosRuntimeException(
-            "rolling-update on deployment-group " + deploymentGroup.getName() + " failed", e);
-      }
+      return ret;
+    } catch (KeeperException | IOException e) {
+      throw new HeliosRuntimeException("getting deployment group tasks failed", e);
     }
   }
 
-  private RolloutOpsEvents getRolloutOperations(final DeploymentGroup deploymentGroup,
-                                                final DeploymentGroupStatus status) {
-    final int taskIndex = status.getTaskIndex();
-    final RolloutTask currentTask = Iterables.get(status.getRolloutTasks(), taskIndex, null);
-    final RollingUpdateTaskResult result = getRollingUpdateTaskResult(currentTask, deploymentGroup);
+  private RollingUpdateOp processRollingUpdateTask(final ZooKeeperClient client,
+                                                   final RollingUpdateOpFactory opFactory,
+                                                   final RolloutTask task,
+                                                   final DeploymentGroup deploymentGroup) {
+    final RolloutTask.Action action = task.getAction();
+    final String host = task.getTarget();
 
-    final String statusPath = Paths.statusDeploymentGroup(deploymentGroup.getName());
-    final RolloutOpsEvents opsEvents = new RolloutOpsEvents();
-
-    if (result.equals(RollingUpdateTaskResult.TASK_IN_PROGRESS)) {
-      // not an error, but nothing to do
-      return opsEvents;
+    switch (action) {
+      case UNDEPLOY_OLD_JOBS:
+        // add undeploy ops for jobs previously deployed by this deployment group
+        return rollingUpdateUndeploy(client, opFactory, deploymentGroup, host);
+      case DEPLOY_NEW_JOB:
+        // add deploy ops for the new job
+        return rollingUpdateDeploy(client, opFactory, deploymentGroup, host);
+      case AWAIT_RUNNING:
+        return rollingUpdateAwaitRunning(client, opFactory, deploymentGroup, host);
+      default:
+        throw new HeliosRuntimeException(String.format(
+            "unknown rollout task type %s for deployment group %s.",
+            action, deploymentGroup.getName()));
     }
+  }
 
-    if (result.error != null) {
-      // if an error occurred, record it in the status and fail
-      opsEvents.addEvent(DeploymentGroupEvent.newBuilder()
-                       .setDeploymentGroupStatus(status.toBuilder().setState(FAILED).build())
-                       .build());
-      final String errMsg = isNullOrEmpty(result.host) ? result.error.getMessage() :
-                            result.host + ": " + result.error.getMessage();
-      opsEvents.addOperation(set(statusPath, status.toBuilder()
-          .setState(FAILED)
-          .setError(errMsg)
-          .build()));
-    } else {
-      for (ZooKeeperOperation op : result.operations) {
-        opsEvents.addOperation(op);
-      }
+  @Override
+  public void rollingUpdateStep() {
+    final ZooKeeperClient client = provider.get("rollingUpdateStep");
 
-      if (!result.operations.isEmpty()) {
-        // if we're actually doing any operations, then record an event
+    final Map<String, VersionedValue<DeploymentGroupTasks>> tasksMap =
+        getDeploymentGroupTasks(client);
 
-        final DeploymentGroupEvent.Builder eventBuilder = DeploymentGroupEvent.newBuilder()
-            .setRolloutTaskStatus(RolloutTask.Status.OK)
-            .setDeploymentGroupStatus(status.toBuilder().setState(ROLLING_OUT).build());
+    for (Map.Entry<String, VersionedValue<DeploymentGroupTasks>> entry : tasksMap.entrySet()) {
+      final String deploymentGroupName = entry.getKey();
+      final VersionedValue<DeploymentGroupTasks> versionedTasks = entry.getValue();
+      final DeploymentGroupTasks tasks = versionedTasks.value();
 
-        if (currentTask != null) {
-          eventBuilder
-              .setAction(currentTask.getAction())
-              .setTarget(currentTask.getTarget());
+      log.debug("rolling-update step on deployment-group: name={}", deploymentGroupName);
+
+      try {
+        final RollingUpdateOpFactory opFactory = new RollingUpdateOpFactory(
+            tasks, DEPLOYMENT_GROUP_EVENT_FACTORY);
+        final RolloutTask task = tasks.getRolloutTasks().get(tasks.getTaskIndex());
+        final RollingUpdateOp op = processRollingUpdateTask(
+            client, opFactory, task, tasks.getDeploymentGroup());
+
+        if (!op.operations().isEmpty()) {
+          final List<ZooKeeperOperation> ops = Lists.newArrayList();
+          ops.add(check(Paths.statusDeploymentGroupTasks(deploymentGroupName),
+                        versionedTasks.version()));
+          ops.addAll(op.operations());
+          try {
+            client.transaction(ops);
+
+            // Emit events
+            if (kafkaSender != null) {
+              for (final Map<String, Object> event : op.events()) {
+                kafkaSender.send(KafkaRecord.of(
+                    DEPLOYMENT_GROUP_EVENTS_KAFKA_TOPIC, Json.asBytesUnchecked(event)));
+              }
+            }
+          } catch (KeeperException.BadVersionException e) {
+            // some other master beat us in processing this rolling update step. not exceptional.
+            // ideally we would check the path in the exception, but curator doesn't provide a path
+            // for exceptions thrown as part of a transaction.
+            log.debug("error saving rolling-update operations: {}", e);
+          } catch (KeeperException e) {
+            log.error("rolling-update on deployment-group {} failed", deploymentGroupName, e);
+          }
         }
-
-        opsEvents.addEvent(eventBuilder.build());
-      }
-
-      if (taskIndex + 1 >= status.getRolloutTasks().size()) {
-        // successfully completed the last task
-        opsEvents.addOperation(set(statusPath, status.toBuilder()
-            .setSuccessfulIterations(status.getSuccessfulIterations() + 1)
-            .setState(DONE)
-            .build()));
-      } else {
-        opsEvents.addOperation(set(statusPath, status.toBuilder()
-            .setTaskIndex(taskIndex + 1)
-            .build()));
+      } catch (final Exception e) {
+        log.error("error processing rolling update step for {}", deploymentGroupName, e);
       }
     }
-
-    return opsEvents;
   }
 
-  private RollingUpdateTaskResult getRollingUpdateTaskResult(final RolloutTask task,
-                                                             final DeploymentGroup group) {
-    final RollingUpdateTaskResult result;
-    if (task == null) {
-      // if there is no rollout task, then we're done by definition. this can happen
-      // when (for example) there are no hosts in the deployment group
-      result = RollingUpdateTaskResult.TASK_COMPLETE;
-    } else {
-      final String host = task.getTarget();
-      final RolloutTask.Action action = task.getAction();
+  private RollingUpdateOp rollingUpdateAwaitRunning(final ZooKeeperClient client,
+                                                    final RollingUpdateOpFactory opFactory,
+                                                    final DeploymentGroup deploymentGroup,
+                                                    final String host) {
+    final TaskStatus taskStatus = getTaskStatus(client, host, deploymentGroup.getJobId());
+    final JobId jobId = deploymentGroup.getJobId();
 
-      switch (action) {
-        case UNDEPLOY_OLD_JOBS:
-          // add undeploy ops for jobs previously deployed by this deployment group
-          result = rollingUpdateUndeploy(group, host);
-          break;
-        case DEPLOY_NEW_JOB:
-          // add deploy ops for the new job
-          result = rollingUpdateDeploy(group, host);
-          break;
-        case AWAIT_RUNNING:
-          result = rollingUpdateAwaitRunning(group, host);
-          break;
-        default:
-          throw new HeliosRuntimeException(String.format(
-              "unknown rollout task type %s for deployment group %s.", action, group.getName()));
-      }
-    }
-    return result;
-  }
-
-  private RollingUpdateTaskResult rollingUpdateAwaitRunning(final DeploymentGroup deploymentGroup,
-                                                            final String host) {
-    final ZooKeeperClient client = provider.get("rollingUpdateAwaitRunning");
-    final Map<JobId, TaskStatus> taskStatuses = getTaskStatuses(client, host);
-
-    if (!taskStatuses.containsKey(deploymentGroup.getJobId())) {
+    if (taskStatus == null) {
       // Handle cases where agent has not written job status to zookeeper.
 
       // If job is not listed under /config/hosts node, it may have been deployed successfully and
       // then manually undeployed. The job will not get redeployed, so treat this as a failure.
-      final Deployment deployment = getDeployment(host, deploymentGroup.getJobId());
+      final Deployment deployment = getDeployment(host, jobId);
       if (deployment == null) {
-        return RollingUpdateTaskResult.error(
-            "Job unexpectedly undeployed. Perhaps it was manually undeployed?", host);
+        return opFactory.error(
+            "Job unexpectedly undeployed. Perhaps it was manually undeployed?", host,
+            RollingUpdateError.JOB_UNEXPECTEDLY_UNDEPLOYED);
       }
 
       // Check if we've exceeded the timeout for the rollout operation.
-      if (isRolloutTimedOut(deploymentGroup, client)) {
-        return RollingUpdateTaskResult.error("timed out while retrieving job status", host);
+      if (isRolloutTimedOut(client, deploymentGroup)) {
+        return opFactory.error("timed out while retrieving job status", host,
+                               RollingUpdateError.TIMED_OUT_RETRIEVING_JOB_STATUS);
       }
 
       // We haven't detected any errors, so assume the agent will write the status soon.
-      return RollingUpdateTaskResult.TASK_IN_PROGRESS;
-    } else if (!taskStatuses.get(deploymentGroup.getJobId()).getState()
-        .equals(TaskStatus.State.RUNNING)) {
+      return opFactory.yield();
+    } else if (!taskStatus.getState().equals(TaskStatus.State.RUNNING)) {
       // job isn't running yet
 
-      if (isRolloutTimedOut(deploymentGroup, client)) {
-        // time exceeding the configured deploy timeout has passed, and this job is still not
-        // running
-        return RollingUpdateTaskResult.error("timed out waiting for job to reach RUNNING", host);
+      if (isRolloutTimedOut(client, deploymentGroup)) {
+        // We exceeded the configured deploy timeout, and this job is still not running
+        final List<TaskStatus.State> previousJobStates = getPreviousJobStates(jobId, host, 10);
+        final Map<String, Object> metadata = Maps.newHashMap();
+        metadata.put("jobState", taskStatus.getState());
+        metadata.put("previousJobStates", previousJobStates);
+        return opFactory.error("timed out waiting for job to reach RUNNING", host,
+                               RollingUpdateError.TIMED_OUT_WAITING_FOR_JOB_TO_REACH_RUNNING,
+                               metadata);
       }
 
-      return RollingUpdateTaskResult.TASK_IN_PROGRESS;
+      return opFactory.yield();
     } else {
       // the job is running on the host. last thing we have to ensure is that it was
       // deployed by this deployment group. otherwise some weird conflict has occurred and we
       // won't be able to undeploy the job on the next update.
       final Deployment deployment = getDeployment(host, deploymentGroup.getJobId());
       if (deployment == null) {
-        return RollingUpdateTaskResult.error(
+        return opFactory.error(
             "deployment for this job not found in zookeeper. " +
-            "Perhaps it was manually undeployed?", host);
+            "Perhaps it was manually undeployed?", host,
+            RollingUpdateError.JOB_UNEXPECTEDLY_UNDEPLOYED);
       } else if (!Objects.equals(deployment.getDeploymentGroupName(), deploymentGroup.getName())) {
-        return RollingUpdateTaskResult.error(
-            "job was already deployed, either manually or by a different deployment group", host);
+        return opFactory.error(
+            "job was already deployed, either manually or by a different deployment group", host,
+            RollingUpdateError.JOB_ALREADY_DEPLOYED);
       }
 
-      return RollingUpdateTaskResult.TASK_COMPLETE;
+      return opFactory.nextTask();
     }
   }
 
-  private boolean isRolloutTimedOut(final DeploymentGroup deploymentGroup,
-                                    final ZooKeeperClient client) {
+  private boolean isRolloutTimedOut(final ZooKeeperClient client,
+                                    final DeploymentGroup deploymentGroup) {
     try {
-      final String statusPath = Paths.statusDeploymentGroup(deploymentGroup.getName());
+      final String statusPath = Paths.statusDeploymentGroupTasks(deploymentGroup.getName());
       final long secondsSinceDeploy = MILLISECONDS.toSeconds(
           System.currentTimeMillis() - client.getNode(statusPath).getStat().getMtime());
       return secondsSinceDeploy > deploymentGroup.getRolloutOptions().getTimeout();
@@ -774,52 +703,66 @@ public class ZooKeeperMasterModel implements MasterModel {
     }
   }
 
-  private RollingUpdateTaskResult rollingUpdateDeploy(final DeploymentGroup deploymentGroup,
-                                                      final String host) {
+  private RollingUpdateOp rollingUpdateDeploy(final ZooKeeperClient client,
+                                              final RollingUpdateOpFactory opFactory,
+                                              final DeploymentGroup deploymentGroup,
+                                              final String host) {
     final Deployment deployment = Deployment.of(deploymentGroup.getJobId(), Goal.START,
                                                 Deployment.EMTPY_DEPLOYER_USER, this.name,
                                                 deploymentGroup.getName());
-    final ZooKeeperClient client = provider.get("rollingUpdateDeploy");
 
     try {
-      return RollingUpdateTaskResult.of(getDeployOperations(client, host, deployment,
-                                                            Job.EMPTY_TOKEN));
-    } catch (JobDoesNotExistException | TokenVerificationException | HostNotFoundException e) {
-      return RollingUpdateTaskResult.error(e);
+      final String token =
+          firstNonNull(deploymentGroup.getRolloutOptions().getToken(), Job.EMPTY_TOKEN);
+      return opFactory.nextTask(getDeployOperations(client, host, deployment, token));
+    } catch (JobDoesNotExistException e) {
+      return opFactory.error(e, host, RollingUpdateError.JOB_NOT_FOUND);
+    } catch (TokenVerificationException e) {
+      return opFactory.error(e, host, RollingUpdateError.TOKEN_VERIFICATION_ERROR);
+    } catch (HostNotFoundException e) {
+      return opFactory.error(e, host, RollingUpdateError.HOST_NOT_FOUND);
+    } catch (JobPortAllocationConflictException e) {
+      return opFactory.error(e, host, RollingUpdateError.PORT_CONFLICT);
     } catch (JobAlreadyDeployedException e) {
-     return RollingUpdateTaskResult.TASK_COMPLETE;
+      // Nothing to do
+      return opFactory.nextTask();
     }
   }
 
-  private RollingUpdateTaskResult rollingUpdateUndeploy(final DeploymentGroup deploymentGroup,
-                                                        final String host) {
-    final ZooKeeperClient client = provider.get("rollingUpdateUndeploy");
+  private RollingUpdateOp rollingUpdateUndeploy(final ZooKeeperClient client,
+                                                final RollingUpdateOpFactory opFactory,
+                                                final DeploymentGroup deploymentGroup,
+                                                final String host) {
     final List<ZooKeeperOperation> operations = Lists.newArrayList();
 
     for (final Deployment deployment : getTasks(client, host).values()) {
       final boolean isOwnedByDeploymentGroup = Objects.equals(
           deployment.getDeploymentGroupName(), deploymentGroup.getName());
       final boolean isSameJob = deployment.getJobId().equals(deploymentGroup.getJobId());
+      final RolloutOptions rolloutOptions = deploymentGroup.getRolloutOptions();
 
       if (isOwnedByDeploymentGroup || (
-          isSameJob && deploymentGroup.getRolloutOptions().getMigrate())) {
+          isSameJob && rolloutOptions.getMigrate())) {
         if (isSameJob && isOwnedByDeploymentGroup && deployment.getGoal().equals(Goal.START)) {
           // The job we want deployed is already deployed and set to run, so just leave it.
           continue;
         }
 
         try {
-          operations.addAll(getUndeployOperations(client, host, deployment.getJobId(),
-                                                  Job.EMPTY_TOKEN));
-        } catch (TokenVerificationException | HostNotFoundException e) {
-          return RollingUpdateTaskResult.error(e, host);
+          final String token =
+              firstNonNull(deploymentGroup.getRolloutOptions().getToken(), Job.EMPTY_TOKEN);
+          operations.addAll(getUndeployOperations(client, host, deployment.getJobId(), token));
+        } catch (TokenVerificationException e) {
+          return opFactory.error(e, host, RollingUpdateError.TOKEN_VERIFICATION_ERROR);
+        } catch (HostNotFoundException e) {
+          return opFactory.error(e, host, RollingUpdateError.HOST_NOT_FOUND);
         } catch (JobNotDeployedException e) {
           // probably somebody beat us to the punch of undeploying. that's fine.
         }
       }
     }
 
-    return RollingUpdateTaskResult.of(operations);
+    return opFactory.nextTask(operations);
   }
 
   @Override
@@ -831,18 +774,36 @@ public class ZooKeeperMasterModel implements MasterModel {
 
     final ZooKeeperClient client = provider.get("stopDeploymentGroup");
 
+    // TODO(staffan): This is stupid, but required for correct behaviour right now.
     final DeploymentGroup deploymentGroup = getDeploymentGroup(deploymentGroupName);
 
-    final String statusPath = Paths.statusDeploymentGroup(deploymentGroupName);
+    // Delete deployment group tasks (if any) and set DG state to FAILED
     final DeploymentGroupStatus status = DeploymentGroupStatus.newBuilder()
-        .setDeploymentGroup(deploymentGroup)
         .setState(FAILED)
         .setError("Stopped by user")
         .build();
+    final String statusPath = Paths.statusDeploymentGroup(deploymentGroupName);
+    final String tasksPath = Paths.statusDeploymentGroupTasks(deploymentGroupName);
 
     try {
       client.ensurePath(statusPath);
-      client.transaction(set(statusPath, status));
+      client.ensurePath(Paths.statusDeploymentGroupTasks());
+
+      // NOTE: This is racey. If a rollout finishes before the delete() is executed
+      // then this will fail. This is annoying for users, but at least means we won't have
+      // inconsistent state. There's also another race in case the DG is inactive when stop is
+      // called, but has become active when we execute the ZK transaction to stop the DG.
+      final Stat tasksStat = client.stat(tasksPath);
+      if (tasksStat != null) {
+        client.transaction(set(statusPath, status),
+                           delete(tasksPath));
+      } else {
+        // There doesn't seem to be a "check that node doesn't exist" operation so we
+        // do a create and a delete on the same path to emulate it.
+        client.transaction(set(statusPath, status),
+                           create(tasksPath),
+                           delete(tasksPath));
+      }
     } catch (final NoNodeException e) {
       throw new DeploymentGroupDoesNotExistException(deploymentGroupName);
     } catch (final KeeperException e) {
@@ -904,10 +865,7 @@ public class ZooKeeperMasterModel implements MasterModel {
         return null;
       }
 
-      final DeploymentGroupStatus status = Json.read(bytes, DeploymentGroupStatus.class);
-      return status.toBuilder()
-          .setVersion(node.getStat().getVersion())
-          .build();
+      return Json.read(bytes, DeploymentGroupStatus.class);
     } catch (NoNodeException e) {
       return null;
     } catch (KeeperException | IOException e) {
@@ -1106,8 +1064,8 @@ public class ZooKeeperMasterModel implements MasterModel {
     final String parent = Paths.configHostJobCreationParent(id);
     final List<String> children = client.getChildren(parent);
     for (final String child : children) {
-      if (Paths.isConfigJobCreation(id, parent, child)) {
-        return Paths.configJobCreationId(id, parent, child);
+      if (Paths.isConfigJobCreation(child)) {
+        return Paths.configJobCreationId(child);
       }
     }
     return null;
@@ -1225,17 +1183,7 @@ public class ZooKeeperMasterModel implements MasterModel {
 
       // Check for static port collisions
       for (final int port : staticPorts) {
-        final String path = Paths.configHostPort(host, port);
-        try {
-          if (client.stat(path) == null) {
-            continue;
-          }
-          final byte[] b = client.getData(path);
-          final JobId existingJobId = parse(b, JobId.class);
-          throw new JobPortAllocationConflictException(id, existingJobId, host, port);
-        } catch (KeeperException | IOException ex) {
-          throw new HeliosRuntimeException("checking port allocations failed", e);
-        }
+        checkForPortConflicts(client, host, port, id);
       }
 
       // Catch all for logic and ephemeral issues
@@ -1566,8 +1514,9 @@ public class ZooKeeperMasterModel implements MasterModel {
   }
 
   private List<ZooKeeperOperation> getUndeployOperations(final ZooKeeperClient client,
-                                                        final String host, final JobId jobId,
-                                                        final String token)
+                                                         final String host,
+                                                         final JobId jobId,
+                                                         final String token)
       throws HostNotFoundException, JobNotDeployedException, TokenVerificationException {
     assertHostExists(client, host);
 
@@ -1607,7 +1556,7 @@ public class ZooKeeperMasterModel implements MasterModel {
                                                        final Deployment deployment,
                                                        final String token)
       throws JobDoesNotExistException, JobAlreadyDeployedException, TokenVerificationException,
-             HostNotFoundException {
+             HostNotFoundException, JobPortAllocationConflictException {
     assertHostExists(client, host);
     final JobId id = deployment.getJobId();
     final Job job = getJob(id);
@@ -1643,6 +1592,12 @@ public class ZooKeeperMasterModel implements MasterModel {
       // if we get here the node exists already
       throw new JobAlreadyDeployedException(host, id);
     } catch (NoNodeException e) {
+      // Check for port collisions after checking whether the job is already deployed to the host.
+      // This is to prevent us from telling the user a misleading error message about port conflicts
+      // if the real reason of the failure is that the job is already deployed.
+      for (final int port : staticPorts) {
+        checkForPortConflicts(client, host, port, id);
+      }
       operations.add(create(taskPath, task));
       operations.add(create(taskCreationPath));
     } catch (KeeperException e) {
@@ -1660,97 +1615,44 @@ public class ZooKeeperMasterModel implements MasterModel {
     }
   }
 
-  private static class RollingUpdateTaskResult {
-    private final List<ZooKeeperOperation> operations;
-    private final Exception error;
-    private final String host;
-
-    public static final RollingUpdateTaskResult TASK_IN_PROGRESS = of(null);
-
-    public static final RollingUpdateTaskResult TASK_COMPLETE = of(
-        Collections.<ZooKeeperOperation>emptyList());
-
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) {
-        return true;
+  private static void
+  checkForPortConflicts(final ZooKeeperClient client, final String host, final int port,
+                        final JobId jobId) throws JobPortAllocationConflictException {
+    try {
+      final String path = Paths.configHostPort(host, port);
+      if (client.stat(path) == null) {
+        return;
       }
-      if (o == null || getClass() != o.getClass()) {
-        return false;
-      }
-
-      RollingUpdateTaskResult that = (RollingUpdateTaskResult) o;
-
-      if (operations != null ? !operations.equals(that.operations) : that.operations != null) {
-        return false;
-      }
-      if (error != null ? !error.equals(that.error) : that.error != null) {
-        return false;
-      }
-      return !(host != null ? !host.equals(that.host) : that.host != null);
-
-    }
-
-    @Override
-    public int hashCode() {
-      int result = operations != null ? operations.hashCode() : 0;
-      result = 31 * result + (error != null ? error.hashCode() : 0);
-      result = 31 * result + (host != null ? host.hashCode() : 0);
-      return result;
-    }
-
-    private RollingUpdateTaskResult(final List<ZooKeeperOperation> operations,
-                                    final Exception error,
-                                    final String host) {
-      this.operations = operations;
-      this.error = error;
-      this.host = host;
-    }
-
-    public static RollingUpdateTaskResult of(final List<ZooKeeperOperation> operations) {
-      return new RollingUpdateTaskResult(operations, null, null);
-    }
-
-    public static RollingUpdateTaskResult error(final Exception error) {
-      return RollingUpdateTaskResult.error(error, null);
-    }
-
-    public static RollingUpdateTaskResult error(final Exception error, final String host) {
-      return new RollingUpdateTaskResult(null, error, host);
-    }
-
-    public static RollingUpdateTaskResult error(final String error) {
-      return RollingUpdateTaskResult.error(error, null);
-    }
-
-    public static RollingUpdateTaskResult error(final String error, final String host) {
-      return new RollingUpdateTaskResult(null, new HeliosRuntimeException(error), host);
+      final byte[] b = client.getData(path);
+      final JobId existingJobId = parse(b, JobId.class);
+      throw new JobPortAllocationConflictException(jobId, existingJobId, host, port);
+    } catch (KeeperException | IOException ex) {
+      throw new HeliosRuntimeException("checking port allocations failed", ex);
     }
   }
 
-  private static class RolloutOpsEvents {
-    private final List<ZooKeeperOperation> operations = Lists.newArrayList();
-    private final List<DeploymentGroupEvent> events = Lists.newArrayList();
-
-    private void addOperation(final ZooKeeperOperation op) {
-      operations.add(op);
+  private List<TaskStatus.State> getPreviousJobStates(final JobId jobId,
+                                                      final String host,
+                                                      final int maxStates) {
+    List<TaskStatus.State> previousStates;
+    try {
+      final List<TaskStatusEvent> jobHistory = getJobHistory(jobId, host);
+      jobHistory.subList(0, Math.min(maxStates, jobHistory.size()));
+      Function<TaskStatusEvent, TaskStatus.State> statusesToStrings =
+          new Function<TaskStatusEvent, TaskStatus.State>() {
+            @Override
+            public TaskStatus.State apply(@Nullable TaskStatusEvent input) {
+              if (input != null) {
+                return input.getStatus().getState();
+              }
+              return null;
+            }
+          };
+      previousStates = Lists.transform(jobHistory, statusesToStrings);
+    } catch (JobDoesNotExistException ignored) {
+      previousStates = emptyList();
     }
 
-    private void addEvent(final DeploymentGroupEvent event) {
-      events.add(event);
-    }
-
-    private void addAll(final RolloutOpsEvents other) {
-      operations.addAll(other.getOperations());
-      events.addAll(other.getEvents());
-    }
-
-    public List<ZooKeeperOperation> getOperations() {
-      return ImmutableList.copyOf(operations);
-    }
-
-    public List<DeploymentGroupEvent> getEvents() {
-      return ImmutableList.copyOf(events);
-    }
+    return previousStates;
   }
 }

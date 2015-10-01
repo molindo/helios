@@ -47,6 +47,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.spotify.helios.common.descriptors.Job.EMPTY_TOKEN;
 import static java.lang.String.format;
 import static net.sourceforge.argparse4j.impl.Arguments.storeTrue;
 
@@ -63,6 +64,8 @@ public class RollingUpdateCommand extends WildcardJobCommand {
   private final Argument asyncArg;
   private final Argument rolloutTimeoutArg;
   private final Argument migrateArg;
+  private final Argument overlapArg;
+  private final Argument tokenArg;
 
   public RollingUpdateCommand(final Subparser parser) {
     this(parser, new SleepFunction() {
@@ -119,6 +122,19 @@ public class RollingUpdateCommand extends WildcardJobCommand {
         .help("When specified a rolling-update will undeploy not only jobs previously deployed " +
               "by the deployment-group but also jobs with the same job id. Use it ONCE when " +
               "migrating a service to using deployment-groups");
+
+    overlapArg = parser.addArgument("--overlap")
+        .setDefault(false)
+        .action(storeTrue())
+        .help("When specified a rolling-update will, for every host, first deploy the new " +
+              "version of a job before undeploying the old one. Note that the command will fail " +
+              "if the job contains static port assignments.");
+
+    tokenArg = parser.addArgument("--token")
+        .nargs("?")
+        .setDefault(EMPTY_TOKEN)
+        .help("Insecure access token meant to prevent accidental changes to your job " +
+              "(e.g. undeploys).");
   }
 
   @Override
@@ -132,6 +148,8 @@ public class RollingUpdateCommand extends WildcardJobCommand {
     final boolean async = options.getBoolean(asyncArg.getDest());
     final long rolloutTimeout = options.getLong(rolloutTimeoutArg.getDest());
     final boolean migrate = options.getBoolean(migrateArg.getDest());
+    final boolean overlap = options.getBoolean(overlapArg.getDest());
+    final String token = options.getString(tokenArg.getDest());
 
     checkArgument(timeout > 0, "Timeout must be greater than 0");
     checkArgument(parallelism > 0, "Parallelism must be greater than 0");
@@ -143,6 +161,8 @@ public class RollingUpdateCommand extends WildcardJobCommand {
         .setTimeout(timeout)
         .setParallelism(parallelism)
         .setMigrate(migrate)
+        .setOverlap(overlap)
+        .setToken(token)
         .build();
     final RollingUpdateResponse response = client.rollingUpdate(name, jobId, rolloutOptions).get();
 
@@ -156,15 +176,18 @@ public class RollingUpdateCommand extends WildcardJobCommand {
     }
 
     if (!json) {
-      out.println(format("Rolling update%s started: %s -> %s (parallelism=%d, timeout=%d)%s",
+      out.println(format("Rolling update%s started: %s -> %s " +
+                         "(parallelism=%d, timeout=%d, overlap=%b, token=%s)%s",
                          async ? " (async)" : "",
-                         name, jobId.toShortString(), parallelism, timeout,
+                         name, jobId.toShortString(), parallelism, timeout, overlap, token,
                          async ? "" : "\n"));
     }
 
     final Map<String, Object> jsonOutput = Maps.newHashMap();
     jsonOutput.put("parallelism", parallelism);
     jsonOutput.put("timeout", timeout);
+    jsonOutput.put("overlap", overlap);
+    jsonOutput.put("token", token);
 
     if (async) {
       if (json) {
